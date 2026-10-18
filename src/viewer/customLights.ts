@@ -59,6 +59,8 @@ export type CustomLightsHandle = {
   setTransformMode: (mode: TransformMode) => void;
   /** Sync transform gizmo → params (call each frame). */
   update: () => void;
+  /** Fired when a transform-gizmo drag ends (for undo history). */
+  setOnTransformCommit: (fn: (() => void) | null) => void;
   dispose: () => void;
 };
 
@@ -131,8 +133,12 @@ export function createCustomLights(
   transformHelper.visible = false;
   scene.add(transformHelper);
 
+  let onTransformCommit: (() => void) | null = null;
+
   transform.addEventListener('dragging-changed', (event) => {
-    orbit.enabled = !(event as { value: boolean }).value;
+    const dragging = (event as { value: boolean }).value;
+    orbit.enabled = !dragging;
+    if (!dragging) onTransformCommit?.();
   });
 
   transform.addEventListener('objectChange', () => {
@@ -389,6 +395,9 @@ export function createCustomLights(
     setTransformEnabled,
     setTransformMode,
     update,
+    setOnTransformCommit(fn) {
+      onTransformCommit = fn;
+    },
     dispose,
   };
 }

@@ -23,6 +23,8 @@ export type TextsHandle = {
   setTransformMode: (mode: TextTransformMode) => void;
   update: (camera: THREE.Camera) => void;
   getObject3D: (id: string) => THREE.Object3D | null;
+  /** Fired when a transform-gizmo drag ends (for undo history). */
+  setOnTransformCommit: (fn: (() => void) | null) => void;
   dispose: () => void;
 };
 
@@ -140,8 +142,12 @@ export function createTextsHandle(
   helper.visible = false;
   scene.add(helper);
 
+  let onTransformCommit: (() => void) | null = null;
+
   transform.addEventListener('dragging-changed', (event) => {
-    orbit.enabled = !(event as { value: boolean }).value;
+    const dragging = (event as { value: boolean }).value;
+    orbit.enabled = !dragging;
+    if (!dragging) onTransformCommit?.();
   });
 
   const syncFromMesh = (entry: Entry) => {
@@ -311,6 +317,9 @@ export function createTextsHandle(
     },
     getObject3D(id) {
       return entries.find((e) => e.id === id)?.mesh ?? null;
+    },
+    setOnTransformCommit(fn) {
+      onTransformCommit = fn;
     },
     dispose() {
       transform.detach();

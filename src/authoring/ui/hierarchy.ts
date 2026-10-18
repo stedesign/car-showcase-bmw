@@ -2,7 +2,13 @@ import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
 import type { PlanesHandle } from '../planes';
 import type { TextsHandle } from '../texts';
-import type { Project, Selection } from '../project';
+import {
+  CAR_ID,
+  CAR_LIGHTS_ID,
+  FREE_CAMERA_ID,
+  type Project,
+  type Selection,
+} from '../project';
 
 export type HierarchyApi = {
   viewer: Viewer;
@@ -81,11 +87,45 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
 
   host.append(
     section(
+      'Car',
+      [
+        {
+          label: api.viewer.carVisible ? 'Hide' : 'Show',
+          onClick: () => {
+            const next = !api.viewer.carVisible;
+            api.viewer.setCarVisible(next);
+            project.carVisible = next;
+            api.onChange();
+          },
+        },
+      ],
+      [
+        {
+          id: CAR_ID,
+          label: api.viewer.carVisible ? 'BMW M Hybrid V8' : 'BMW M Hybrid V8 (hidden)',
+          kind: 'car' as const,
+          active: sel.kind === 'car' && sel.id === CAR_ID,
+        },
+      ],
+      api,
+    ),
+  );
+
+  host.append(
+    section(
       'Cameras',
       [
         {
+          label: api.cameras.helpersVisible ? 'Hide' : 'Show',
+          onClick: () => {
+            api.cameras.setHelpersVisible(!api.cameras.helpersVisible);
+            api.onChange();
+          },
+        },
+        {
           label: '+',
           onClick: () => {
+            api.cameras.enterFree();
             const clip = api.cameras.add();
             project.cameras = api.cameras.clips.map((c) => structuredClone(c));
             api.select('camera', clip.id);
@@ -93,12 +133,28 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
           },
         },
       ],
-      api.cameras.clips.map((c) => ({
-        id: c.id,
-        label: c.name,
-        kind: 'camera' as const,
-        active: sel.kind === 'camera' && sel.id === c.id,
-      })),
+      [
+        {
+          id: FREE_CAMERA_ID,
+          label:
+            api.cameras.viewMode === 'free'
+              ? 'Free Camera'
+              : 'Free Camera · return',
+          kind: 'freeCamera' as const,
+          active: sel.kind === 'freeCamera',
+        },
+        ...api.cameras.clips.map((c) => {
+          const through =
+            api.cameras.viewMode === 'through' &&
+            api.cameras.throughCameraId === c.id;
+          return {
+            id: c.id,
+            label: through ? `${c.name} ●` : c.name,
+            kind: 'camera' as const,
+            active: sel.kind === 'camera' && sel.id === c.id,
+          };
+        }),
+      ],
       api,
     ),
   );
@@ -124,19 +180,27 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
           },
         },
       ],
-      api.viewer.customLights.entries.map((e) => ({
-        id: e.id,
-        label: e.params.name,
-        kind: 'light' as const,
-        active: sel.kind === 'light' && sel.id === e.id,
-      })),
+      [
+        {
+          id: CAR_LIGHTS_ID,
+          label: 'Car Lights',
+          kind: 'carLights' as const,
+          active: sel.kind === 'carLights' && sel.id === CAR_LIGHTS_ID,
+        },
+        ...api.viewer.customLights.entries.map((e) => ({
+          id: e.id,
+          label: e.params.name,
+          kind: 'light' as const,
+          active: sel.kind === 'light' && sel.id === e.id,
+        })),
+      ],
       api,
     ),
   );
 
   host.append(
     section(
-      'Planes',
+      'Rectangles',
       [
         {
           label: '+',

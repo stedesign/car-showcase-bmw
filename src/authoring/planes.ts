@@ -21,6 +21,8 @@ export type PlanesHandle = {
   setTransformMode: (mode: PlaneTransformMode) => void;
   update: () => void;
   getObject3D: (id: string) => THREE.Object3D | null;
+  /** Fired when a transform-gizmo drag ends (for undo history). */
+  setOnTransformCommit: (fn: (() => void) | null) => void;
   dispose: () => void;
 };
 
@@ -31,17 +33,24 @@ type Entry = {
   material: THREE.MeshStandardMaterial;
 };
 
+const DEFAULT_EXTRUDE_DEPTH = 0.05;
+
 function defaultPlane(index: number, id: string): PlaneClip {
   return {
     id,
-    name: `Plane ${index}`,
+    name: `Rectangle ${index}`,
     position: vec3(-1.5, 1.2, 2.5),
     rotation: vec3(0, 25, 0),
     scale: vec3(2.4, 1.6, 1),
     opacity: 1,
     castShadow: true,
     color: '#0a0a0a',
+    extrude: false,
   };
+}
+
+function geometryFor(extrude: boolean): THREE.BufferGeometry {
+  return extrude ? new THREE.BoxGeometry(1, 1, 1) : new THREE.PlaneGeometry(1, 1);
 }
 
 export function createPlanesHandle(
@@ -67,8 +76,12 @@ export function createPlanesHandle(
   helper.visible = false;
   scene.add(helper);
 
+  let onTransformCommit: (() => void) | null = null;
+
   transform.addEventListener('dragging-changed', (event) => {
-    orbit.enabled = !(event as { value: boolean }).value;
+    const dragging = (event as { value: boolean }).value;
+    orbit.enabled = !dragging;
+    if (!dragging) onTransformCommit?.();
   });
 
   const syncFromMesh = (entry: Entry) => {
@@ -89,6 +102,12 @@ export function createPlanesHandle(
 
   const applyEntry = (entry: Entry) => {
     const { mesh, material, params } = entry;
+    const wantsBox = !!params.extrude;
+    const isBox = mesh.geometry.type === 'BoxGeometry';
+    if (wantsBox !== isBox) {
+      mesh.geometry.dispose();
+      mesh.geometry = geometryFor(wantsBox);
+    }
     mesh.position.set(params.position.x, params.position.y, params.position.z);
     mesh.rotation.set(
       THREE.MathUtils.degToRad(params.rotation.x),
@@ -129,6 +148,7 @@ export function createPlanesHandle(
       position: partial?.position ? cloneVec3(partial.position) : base.position,
       rotation: partial?.rotation ? cloneVec3(partial.rotation) : base.rotation,
       scale: partial?.scale ? cloneVec3(partial.scale) : base.scale,
+      extrude: partial?.extrude ?? base.extrude,
     };
 
     const material = new THREE.MeshStandardMaterial({
@@ -139,7 +159,7 @@ export function createPlanesHandle(
       opacity: params.opacity,
       side: THREE.DoubleSide,
     });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+    const mesh = new THREE.Mesh(geometryFor(params.extrude), material);
     mesh.castShadow = params.castShadow;
     mesh.receiveShadow = false;
 
@@ -220,6 +240,9 @@ export function createPlanesHandle(
     getObject3D(id) {
       return entries.find((e) => e.id === id)?.mesh ?? null;
     },
+    setOnTransformCommit(fn) {
+      onTransformCommit = fn;
+    },
     dispose() {
       transform.detach();
       transform.dispose();
@@ -233,4 +256,11 @@ export function createPlanesHandle(
 
 export function setPlaneVec3(params: PlaneClip, key: 'position' | 'rotation' | 'scale', v: Vec3) {
   params[key] = cloneVec3(v);
+}
+
+/** Sensible thin depth when turning extrude on from a flat plane (scale.z ≈ 1). */
+export function ensureExtrudeDepth(params: PlaneClip) {
+  if (params.extrude && Math.abs(params.scale.z - 1) < 0.001) {
+    params.scale = vec3(params.scale.x, params.scale.y, DEFAULT_EXTRUDE_DEPTH);
+  }
 }

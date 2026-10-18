@@ -151,6 +151,7 @@ export class Viewer {
   private onStatus?: (msg: string) => void;
   private disposed = false;
   private externalTick: ((dt: number, elapsed: number) => void) | null = null;
+  private postRender: (() => void) | null = null;
   private extraShadowExcludes: THREE.Object3D[] = [];
 
   constructor(container: HTMLElement, onStatus?: (msg: string) => void) {
@@ -285,6 +286,19 @@ export class Viewer {
     return this.renderer.domElement;
   }
 
+  /** Show / hide the loaded car (and its attached light FX under modelRoot). */
+  get carVisible() {
+    return this.modelRoot.visible;
+  }
+
+  set carVisible(visible: boolean) {
+    this.modelRoot.visible = visible;
+  }
+
+  setCarVisible(visible: boolean) {
+    this.carVisible = visible;
+  }
+
   setGuiVisible(visible: boolean) {
     // GUI lives outside; used to hide ground grid during record if needed
     void visible;
@@ -293,6 +307,11 @@ export class Viewer {
   /** Hook for authoring timeline / editor updates each frame. */
   setExternalTick(fn: ((dt: number, elapsed: number) => void) | null) {
     this.externalTick = fn;
+  }
+
+  /** Called after the main frame is drawn (e.g. camera preview). */
+  setPostRender(fn: (() => void) | null) {
+    this.postRender = fn;
   }
 
   /** Objects excluded from ambient contact-shadow capture (planes, texts, gizmos). */
@@ -591,6 +610,7 @@ export class Viewer {
         ...this.extraShadowExcludes,
       ].filter(Boolean) as THREE.Object3D[]);
       this.effects.render();
+      this.postRender?.();
     };
     tick();
   }

@@ -1,5 +1,6 @@
 import type {
   CameraPoseValue,
+  CubicBezier,
   EasingName,
   Keyframe,
   KeyframeValue,
@@ -8,6 +9,7 @@ import type {
   Vec3,
 } from './project';
 import { cloneVec3, nextAuthoringId } from './project';
+import { cubicBezierEase, defaultBezier, resolveBezier } from './bezier';
 
 export type TimelineState = 'idle' | 'playing';
 
@@ -30,14 +32,23 @@ export type TimelineEngine = {
   bindProject: (project: Project) => void;
   ensureTrack: (target: string) => TimelineTrack;
   setKeyframe: (target: string, t: number, value: KeyframeValue, easing?: EasingName) => void;
+  setKeyframeBezier: (trackId: string, t: number, bezier: CubicBezier) => void;
   removeKeyframe: (trackId: string, t: number) => void;
+  /** Move a keyframe in time (snaps, merges on collision). */
+  moveKeyframe: (trackId: string, fromT: number, toT: number) => void;
   getTracks: () => TimelineTrack[];
 };
 
-function ease(u: number, name: EasingName = 'linear'): number {
+function ease(
+  u: number,
+  easing: EasingName | undefined,
+  bezier: CubicBezier | undefined,
+): number {
   const t = Math.min(1, Math.max(0, u));
-  if (name === 'easeInOut') {
-    return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  if (bezier) return cubicBezierEase(t, bezier);
+  if (easing === 'linear') return t;
+  if (easing === 'easeInOut') {
+    return cubicBezierEase(t, defaultBezier('easeInOut'));
   }
   return t;
 }
@@ -87,7 +98,12 @@ function interpolate(
 
   const span = b.t - a.t;
   if (span <= 1e-6) return structuredClone(b.value) as KeyframeValue;
-  const u = ease((t - a.t) / span, b.easing ?? a.easing ?? 'linear');
+  // Easing into the destination key (Spline / CSS convention).
+  const u = ease(
+    (t - a.t) / span,
+    b.easing ?? a.easing ?? 'easeInOut',
+    b.bezier ?? a.bezier,
+  );
 
   const va = a.value;
   const vb = b.value;
@@ -225,16 +241,47 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
       if (existing) {
         existing.value = cloned;
         existing.easing = easing;
+        if (!existing.bezier) existing.bezier = defaultBezier(easing);
       } else {
-        track.keyframes.push({ t: snapped, value: cloned, easing });
+        track.keyframes.push({
+          t: snapped,
+          value: cloned,
+          easing,
+          bezier: defaultBezier(easing),
+        });
       }
       sortKeys(track);
+    },
+    setKeyframeBezier(trackId, t, bezier) {
+      if (!project) return;
+      const track = project.timeline.tracks.find((tr) => tr.id === trackId);
+      if (!track) return;
+      const key = track.keyframes.find((k) => Math.abs(k.t - t) < 1e-3);
+      if (!key) return;
+      key.bezier = resolveBezier(bezier, key.easing);
+      key.easing = 'easeInOut';
     },
     removeKeyframe(trackId, t) {
       if (!project) return;
       const track = project.timeline.tracks.find((tr) => tr.id === trackId);
       if (!track) return;
       track.keyframes = track.keyframes.filter((k) => Math.abs(k.t - t) > 1e-3);
+    },
+    moveKeyframe(trackId, fromT, toT) {
+      if (!project) return;
+      const track = project.timeline.tracks.find((tr) => tr.id === trackId);
+      if (!track) return;
+      const key = track.keyframes.find((k) => Math.abs(k.t - fromT) < 1e-3);
+      if (!key) return;
+      const snapped = Math.round(Math.max(0, Math.min(duration, toT)) * 1000) / 1000;
+      const other = track.keyframes.find(
+        (k) => k !== key && Math.abs(k.t - snapped) < 1e-3,
+      );
+      if (other) {
+        track.keyframes = track.keyframes.filter((k) => k !== other);
+      }
+      key.t = snapped;
+      sortKeys(track);
     },
     getTracks() {
       return tracks();

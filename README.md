@@ -32,7 +32,7 @@ Drag-and-drop another `.glb` / `.gltf` onto the window to swap models.
 1. Orbit to a hero frame → select a camera → **Capture view**.
 2. Add spot lights and matte **planes** for shadow wipes (planes cast shadows; softboxes are look-dev only).
 3. Add **text** (presets from car specs) — rendered in-canvas so it appears in the MP4.
-4. Scrub the playhead → **+ Keyframe** on the selected object.
+4. Scrub the playhead → **Cut** (switch camera) or **Animate** (move within a shot).
 5. **Play** to preview → **Record** to play from `t=0` and export `bmw-m-hybrid-v8-wrt.mp4`.
 
 Projects autosave to `localStorage` (`wrt-paddock-project`). Use **Export JSON** for backups.

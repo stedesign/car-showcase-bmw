@@ -28,6 +28,8 @@ export type PlaneClip = {
   opacity: number;
   castShadow: boolean;
   color: string;
+  /** When true, render as a box (scale.z = depth); otherwise a flat plane. */
+  extrude: boolean;
 };
 
 export type TextAlign = 'left' | 'center' | 'right';
@@ -48,6 +50,14 @@ export type TextClip = {
 
 export type EasingName = 'linear' | 'easeInOut';
 
+/** CSS-style cubic-bezier control points (into this keyframe). */
+export type CubicBezier = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+};
+
 export type KeyframeValue =
   | number
   | string
@@ -65,6 +75,8 @@ export type Keyframe = {
   t: number;
   value: KeyframeValue;
   easing?: EasingName;
+  /** When set, overrides `easing` for interpolation into this key. */
+  bezier?: CubicBezier;
 };
 
 export type TimelineTrack = {
@@ -80,6 +92,8 @@ export type Project = {
   duration: number;
   fps: number;
   playCameraId: string;
+  /** When false, the car mesh (and attached car-light FX) are hidden. */
+  carVisible: boolean;
   look: SavedSettings;
   cameras: CameraClip[];
   planes: PlaneClip[];
@@ -87,7 +101,24 @@ export type Project = {
   timeline: { tracks: TimelineTrack[] };
 };
 
-export type SelectionKind = 'camera' | 'light' | 'plane' | 'text' | null;
+export type SelectionKind =
+  | 'freeCamera'
+  | 'camera'
+  | 'light'
+  | 'car'
+  | 'carLights'
+  | 'plane'
+  | 'text'
+  | null;
+
+/** Fixed selection id for the vehicle light rig (timeline: carLights.*). */
+export const CAR_LIGHTS_ID = 'car-lights';
+
+/** Fixed selection id for the car model (timeline: car.visible). */
+export const CAR_ID = 'car';
+
+/** Fixed selection id for the orbit / free viewport camera. */
+export const FREE_CAMERA_ID = 'free-camera';
 
 export type Selection = {
   kind: SelectionKind;
@@ -185,6 +216,7 @@ export function createDefaultProject(viewer?: Viewer): Project {
     duration: 8,
     fps: 30,
     playCameraId: cameras[0].id,
+    carVisible: true,
     look: viewer ? captureSettings(viewer) : defaultSettings(),
     cameras,
     planes: [],
@@ -206,6 +238,12 @@ export function parseProject(raw: string): Project | null {
     const parsed = JSON.parse(raw) as Project;
     if (parsed?.version !== PROJECT_VERSION) return null;
     if (!Array.isArray(parsed.cameras) || !parsed.timeline) return null;
+    if (typeof parsed.carVisible !== 'boolean') parsed.carVisible = true;
+    if (Array.isArray(parsed.planes)) {
+      for (const plane of parsed.planes) {
+        if (typeof plane.extrude !== 'boolean') plane.extrude = false;
+      }
+    }
     syncIdCounterFromProject(parsed);
     return parsed;
   } catch {

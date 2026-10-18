@@ -31,7 +31,7 @@ async function boot() {
   const editor = await createEditor(viewer, recorder, setStatus);
   (window as unknown as { __editor: typeof editor }).__editor = editor;
   setupDragDrop(viewer);
-  setStatus('Director ready — frame cameras, keyframe, Record');
+  setStatus('');
 }
 
 function setupDragDrop(viewer: Viewer) {

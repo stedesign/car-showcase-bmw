@@ -1,8 +1,15 @@
 import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
-import type { PlanesHandle } from '../planes';
+import { ensureExtrudeDepth, type PlanesHandle } from '../planes';
 import { TEXT_PRESETS, type TextsHandle } from '../texts';
-import type { Project, Selection, Vec3 } from '../project';
+import {
+  CAR_ID,
+  CAR_LIGHTS_ID,
+  FREE_CAMERA_ID,
+  type Project,
+  type Selection,
+  type Vec3,
+} from '../project';
 import { renderLookPanel } from './lookPanel';
 
 export type InspectorApi = {
@@ -13,6 +20,8 @@ export type InspectorApi = {
   planes: PlanesHandle;
   texts: TextsHandle;
   onChange: () => void;
+  /** History-only (no panel rebuild) — used by look sliders. */
+  onLookEdit: () => void;
   setStatus: (msg: string) => void;
 };
 
@@ -50,6 +59,28 @@ function num(
   input.step = String(step);
   input.value = String(Number(value.toFixed(3)));
   input.addEventListener('change', () => onChange(parseFloat(input.value) || 0));
+  return input;
+}
+
+function slider(
+  value: number,
+  min: number,
+  max: number,
+  step: number,
+  onChange: (v: number) => void,
+): HTMLInputElement {
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = String(min);
+  input.max = String(max);
+  input.step = String(step);
+  input.value = String(value);
+  input.title = String(Number(value.toFixed(3)));
+  input.addEventListener('input', () => {
+    const v = parseFloat(input.value);
+    input.title = String(Number(v.toFixed(3)));
+    onChange(v);
+  });
   return input;
 }
 
@@ -111,11 +142,43 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
   if (!sel.kind || !sel.id) {
     const p = document.createElement('p');
     p.style.cssText = 'color:var(--ed-muted);font-size:12px;padding:4px 0 12px';
-    p.textContent = 'Select a camera, light, plane, or text.';
+    p.textContent = 'Select a camera, light, rectangle, or text.';
     body.append(p);
+  } else if (sel.kind === 'car' && sel.id === CAR_ID) {
+    body.append(
+      field(
+        'Visible',
+        check(api.viewer.carVisible, (v) => {
+          api.viewer.setCarVisible(v);
+          project.carVisible = v;
+          api.onChange();
+        }),
+      ),
+    );
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+    hint.textContent =
+      'Animate Visible on the timeline to reveal / hide the car.';
+    body.append(hint);
+  } else if (sel.kind === 'freeCamera' && sel.id === FREE_CAMERA_ID) {
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:12px;padding:4px 0 8px';
+    hint.textContent =
+      'Orbit / pan / zoom freely. Dedicated cameras stay as gizmos in the scene — select one to move it without leaving free view.';
+    body.append(hint);
+    body.append(
+      btn('Stay in free view', () => {
+        api.cameras.enterFree();
+        api.setStatus('Free camera');
+        api.onChange();
+      }),
+    );
   } else if (sel.kind === 'camera') {
     const clip = api.cameras.get(sel.id);
     if (clip) {
+      const lookingThrough =
+        api.cameras.viewMode === 'through' &&
+        api.cameras.throughCameraId === clip.id;
       body.append(
         field(
           'Name',
@@ -128,7 +191,8 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           'FOV',
           num(clip.fov, 0.1, (v) => {
             clip.fov = v;
-            api.cameras.applyClip(clip.id);
+            api.cameras.refreshHelpers();
+            if (lookingThrough) api.cameras.applyClip(clip.id);
             api.onChange();
           }),
         ),
@@ -136,29 +200,58 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           'Position',
           vec3Inputs(clip.position, (v) => {
             clip.position = v;
-            api.cameras.applyClip(clip.id);
+            api.cameras.refreshHelpers();
+            if (lookingThrough) api.cameras.applyClip(clip.id);
           }),
         ),
         field(
           'Target',
           vec3Inputs(clip.target, (v) => {
             clip.target = v;
-            api.cameras.applyClip(clip.id);
+            api.cameras.refreshHelpers();
+            if (lookingThrough) api.cameras.applyClip(clip.id);
           }),
         ),
       );
+      const gizmoRow = document.createElement('div');
+      gizmoRow.className = 'ed-row';
+      gizmoRow.append(
+        btn('Move cam', () => {
+          api.cameras.setGizmoTarget('body');
+          api.cameras.setTransformMode('translate');
+        }),
+        btn('Rotate cam', () => {
+          api.cameras.setGizmoTarget('body');
+          api.cameras.setTransformMode('rotate');
+        }),
+        btn('Move aim', () => {
+          api.cameras.setGizmoTarget('aim');
+        }),
+      );
+      body.append(gizmoRow);
+
       const row = document.createElement('div');
       row.className = 'ed-row';
       row.append(
-        btn('Capture view', () => {
-          api.cameras.captureFromView(clip.id);
-          api.setStatus(`Captured ${clip.name}`);
-          api.onChange();
-        }),
-        btn('Apply', () => {
-          api.cameras.applyClip(clip.id);
+        btn(lookingThrough ? 'Looking through ●' : 'Look through', () => {
+          api.cameras.lookThrough(clip.id);
           api.cameras.setPlayCameraId(clip.id);
           project.playCameraId = clip.id;
+          api.setStatus(`Looking through ${clip.name}`);
+          api.onChange();
+        }, lookingThrough ? 'ed-btn primary' : 'ed-btn'),
+        btn('Back to free', () => {
+          api.cameras.enterFree();
+          api.cameras.select(clip.id);
+          api.setStatus('Free camera — drag gizmo to move/rotate');
+          api.onChange();
+        }),
+        btn('Capture free view', () => {
+          api.cameras.enterFree();
+          api.cameras.captureFromView(clip.id);
+          api.cameras.select(clip.id);
+          api.setStatus(`Captured free view → ${clip.name}`);
+          api.onChange();
         }),
         btn(
           'Delete',
@@ -173,7 +266,100 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
         ),
       );
       body.append(row);
+      const tip = document.createElement('p');
+      tip.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+      tip.textContent = lookingThrough
+        ? 'Looking through this shot. Use Back to free to edit the gizmo in free view.'
+        : 'Drag the transform gizmo to move/rotate. Use Move aim for the gold target. Look through to preview.';
+      body.append(tip);
     }
+  } else if (sel.kind === 'carLights' && sel.id === CAR_LIGHTS_ID) {
+    const cl = api.viewer.carLights.params;
+    const applyCl = () => api.viewer.carLights.applyParams();
+    body.append(
+      field(
+        'Enabled',
+        check(cl.enabled, (v) => {
+          cl.enabled = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Grille outline',
+        check(cl.grilleEnabled, (v) => {
+          cl.grilleEnabled = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Grille strength',
+        slider(cl.grilleStrength, 0, 20, 0.01, (v) => {
+          cl.grilleStrength = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Headlight edge',
+        check(cl.edgeEnabled, (v) => {
+          cl.edgeEnabled = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Edge strength',
+        slider(cl.edgeStrength, 0, 20, 0.01, (v) => {
+          cl.edgeStrength = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Rear red',
+        check(cl.redEnabled, (v) => {
+          cl.redEnabled = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Red strength',
+        slider(cl.redStrength, 0, 20, 0.01, (v) => {
+          cl.redStrength = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Ground glow',
+        check(cl.groundGlow, (v) => {
+          cl.groundGlow = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Glow strength',
+        slider(cl.groundGlowStrength, 0, 10, 0.01, (v) => {
+          cl.groundGlowStrength = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Beams',
+        check(cl.beamsEnabled, (v) => {
+          cl.beamsEnabled = v;
+          applyCl();
+        }),
+      ),
+      field(
+        'Beam strength',
+        slider(cl.beamStrength, 0, 3, 0.01, (v) => {
+          cl.beamStrength = v;
+          applyCl();
+        }),
+      ),
+    );
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+    hint.textContent =
+      'Scrub the timeline and press Animate to keyframe strengths / toggles.';
+    body.append(hint);
   } else if (sel.kind === 'light') {
     const entry = api.viewer.customLights.entries.find((e) => e.id === sel.id);
     if (entry) {
@@ -283,6 +469,26 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           }),
         ),
         field(
+          'Extrude',
+          check(!!p.extrude, (v) => {
+            p.extrude = v;
+            ensureExtrudeDepth(p);
+            api.planes.apply(entry.id);
+            api.onChange();
+          }),
+        ),
+        ...(p.extrude
+          ? [
+              field(
+                'Depth',
+                num(p.scale.z, 0.01, (v) => {
+                  p.scale = { ...p.scale, z: Math.max(0.001, v) };
+                  api.planes.apply(entry.id);
+                }),
+              ),
+            ]
+          : []),
+        field(
           'Position',
           vec3Inputs(p.position, (v) => {
             p.position = v;
@@ -297,11 +503,26 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           }),
         ),
         field(
-          'Scale',
-          vec3Inputs(p.scale, (v) => {
-            p.scale = v;
-            api.planes.apply(entry.id);
-          }),
+          p.extrude ? 'Size (X Y)' : 'Scale',
+          p.extrude
+            ? (() => {
+                const wrap = document.createElement('div');
+                wrap.className = 'ed-vec3';
+                const mk = (key: 'x' | 'y') => {
+                  const input = num(p.scale[key], 0.01, (n) => {
+                    p.scale = { ...p.scale, [key]: n };
+                    api.planes.apply(entry.id);
+                  });
+                  input.title = key.toUpperCase();
+                  return input;
+                };
+                wrap.append(mk('x'), mk('y'));
+                return wrap;
+              })()
+            : vec3Inputs(p.scale, (v) => {
+                p.scale = v;
+                api.planes.apply(entry.id);
+              }),
         ),
       );
       const modes = document.createElement('div');
@@ -418,5 +639,5 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
 
   const lookHost = document.createElement('div');
   host.append(lookHost);
-  renderLookPanel(api.viewer, lookHost);
+  renderLookPanel(api.viewer, lookHost, api.onLookEdit);
 }
