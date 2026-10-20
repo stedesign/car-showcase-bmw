@@ -15,6 +15,11 @@ export type GroundHandle = {
   /** 0 = uniform wet film, 1 = strong puddle contrast. */
   setPuddleStrength: (value: number) => void;
   setVisible: (visible: boolean) => void;
+  /**
+   * Empty-garage mode: keep the *same* wet studio floor when the car is hidden
+   * (no material swap). Slightly boosts readability; FX fog/vignette handled elsewhere.
+   */
+  setEmptyGarage: (active: boolean) => void;
 };
 
 function configureMap(
@@ -166,6 +171,8 @@ export async function createGround(
 
   let puddleStrength = 0.55;
   let puddleRough = buildPuddledRoughness(maps.roughnessImage, puddleStrength);
+  let storedReflectivity = 0.82;
+  let emptyGarage = false;
 
   const overlayMat = new THREE.MeshStandardMaterial({
     map: maps.albedo,
@@ -184,6 +191,8 @@ export async function createGround(
     envMapIntensity: 0.22,
     transparent: true,
     opacity: 0.42,
+    emissive: new THREE.Color(0x000000),
+    emissiveIntensity: 0,
   });
 
   const overlay = new THREE.Mesh(overlayGeo, overlayMat);
@@ -210,13 +219,18 @@ export async function createGround(
   shadowCatcher.renderOrder = 2;
   group.add(shadowCatcher);
 
-  const setReflectivity = (value: number) => {
+  const applyReflectivity = (value: number) => {
     const t = THREE.MathUtils.clamp(value, 0, 1);
     // Higher reflectivity → more mirror through a thinner concrete film
     overlayMat.opacity = 1 - t * 0.78;
     // Slightly glossier when more reflective (puddle map still breaks it up)
     overlayMat.roughness = THREE.MathUtils.lerp(0.55, 0.28, t);
     reflector.visible = t > 0.02;
+  };
+
+  const setReflectivity = (value: number) => {
+    storedReflectivity = THREE.MathUtils.clamp(value, 0, 1);
+    if (!emptyGarage) applyReflectivity(storedReflectivity);
   };
 
   const setPuddleStrength = (value: number) => {
@@ -233,7 +247,31 @@ export async function createGround(
     group.visible = visible;
   };
 
-  setReflectivity(0.88);
+  const setEmptyGarage = (active: boolean) => {
+    emptyGarage = active;
+    group.visible = true;
+    // Always keep the wet studio stack (reflector + overlay) — never swap materials.
+    overlay.visible = true;
+    shadowCatcher.visible = true;
+    if (active) {
+      // Same look as with the car; fog off so the slab doesn't dissolve to void,
+      // slight emissive so it still reads without car-light pools.
+      overlayMat.fog = false;
+      overlayMat.emissive.setHex(0x1a1a22);
+      overlayMat.emissiveIntensity = 0.22;
+      overlayMat.envMapIntensity = 0.4;
+      // A touch more concrete film so the mirror isn't pure black void.
+      applyReflectivity(Math.min(storedReflectivity, 0.72));
+    } else {
+      overlayMat.fog = true;
+      overlayMat.emissive.setHex(0x000000);
+      overlayMat.emissiveIntensity = 0;
+      overlayMat.envMapIntensity = 0.22;
+      applyReflectivity(storedReflectivity);
+    }
+  };
+
+  applyReflectivity(0.88);
 
   return {
     group,
@@ -243,5 +281,6 @@ export async function createGround(
     setReflectivity,
     setPuddleStrength,
     setVisible,
+    setEmptyGarage,
   };
 }

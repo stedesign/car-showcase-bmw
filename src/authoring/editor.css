@@ -370,6 +370,121 @@ body {
   position: relative;
 }
 
+.ed-timeline-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ed-mode-toggle {
+  display: flex;
+  gap: 0;
+  margin-right: 4px;
+  border: 1px solid var(--ed-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.ed-mode-toggle .ed-mode-btn {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ed-mode-toggle .ed-mode-btn.active {
+  background: var(--ed-accent);
+  color: #fff;
+}
+
+.ed-master {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.ed-master-dur,
+.ed-master-time {
+  font-size: 11px;
+  color: var(--ed-muted);
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ed-master-scroll {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+  padding: 12px 12px 28px;
+}
+
+.ed-master-track {
+  position: relative;
+  height: 72px;
+  background: var(--ed-track);
+  border-radius: 6px;
+  min-width: 100%;
+}
+
+.ed-master-clip {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  background: linear-gradient(180deg, #3a4a6a 0%, #2a3548 100%);
+  border: 1px solid #5b8def;
+  border-radius: 4px;
+  padding: 6px 8px;
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ed-master-clip.selected {
+  border-color: var(--ed-accent-2);
+  box-shadow: 0 0 0 1px var(--ed-accent-2);
+}
+
+.ed-master-clip-label {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ed-master-clip-meta {
+  font-size: 10px;
+  color: var(--ed-muted);
+}
+
+.ed-master-clip-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: auto;
+  flex-wrap: wrap;
+}
+
+.ed-master-clip-actions .ed-btn {
+  padding: 2px 5px;
+  font-size: 10px;
+}
+
+.ed-master-playhead {
+  position: absolute;
+  top: 44px;
+  bottom: 8px;
+  left: 12px;
+  width: 2px;
+  background: var(--ed-playhead);
+  pointer-events: none;
+  z-index: 3;
+}
+
 .ed-tl-resize {
   position: absolute;
   top: -4px;
@@ -548,6 +663,21 @@ body.ed-tl-resizing * {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 4px;
+}
+
+.ed-vec3-axis {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ed-vec3-label {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--ed-muted);
+  text-align: center;
 }
 
 .ed-row {

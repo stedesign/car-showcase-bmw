@@ -9,6 +9,10 @@ import {
 } from './carMaterials';
 import { DEFAULT_SOFTBOX_PARAMS, type SoftboxParams } from './softboxes';
 import {
+  DEFAULT_ROOF_STROBE_PARAMS,
+  type RoofStrobeParams,
+} from './roofStrobe';
+import {
   DEFAULT_CAR_LIGHTS_PARAMS,
   type CarLightsParams,
 } from './carLights';
@@ -17,6 +21,10 @@ import {
   type AmbientShadowParams,
 } from './ambientShadows';
 import { DEFAULT_LOGO_PARAMS, type WrtLogoParams } from './wrtLogo';
+import {
+  DEFAULT_DOT_GRID_PARAMS,
+  type DotGridParams,
+} from './dottedWrtScreen';
 import { DEFAULT_EFFECTS_PARAMS, type EffectsParams } from './effects';
 import type { CustomLightParams } from './customLights';
 
@@ -30,9 +38,11 @@ export type SavedSettings = {
   floorPuddles: number;
   paint: CarMaterialsParams;
   softboxes: SoftboxParams;
+  roofStrobe: RoofStrobeParams;
   carLights: CarLightsParams;
   ambient: AmbientShadowParams;
   logo: WrtLogoParams;
+  dotGrid: DotGridParams;
   effects: EffectsParams;
   customLights: CustomLightParams[];
 };
@@ -50,9 +60,15 @@ export function captureSettings(viewer: Viewer): SavedSettings {
     floorPuddles: viewer.state.floorPuddles,
     paint: structuredClone(viewer.carMaterials.params),
     softboxes: structuredClone(viewer.softboxes.params),
+    roofStrobe: {
+      ...structuredClone(viewer.roofStrobe.params),
+      flashIntensity: 0,
+      strobing: false,
+    },
     carLights: structuredClone(viewer.carLights.params),
     ambient: structuredClone(viewer.ambientShadows.params),
     logo: structuredClone(viewer.logo.params),
+    dotGrid: structuredClone(viewer.dotGrid.params),
     effects: structuredClone(viewer.effects.params),
     customLights: viewer.customLights.entries.map((e) => ({
       ...structuredClone(e.params),
@@ -70,9 +86,11 @@ export function defaultSettings(): SavedSettings {
     floorPuddles: DEFAULT_VIEWER_STATE.floorPuddles,
     paint: structuredClone(DEFAULT_CAR_MATERIALS_PARAMS),
     softboxes: structuredClone(DEFAULT_SOFTBOX_PARAMS),
+    roofStrobe: structuredClone(DEFAULT_ROOF_STROBE_PARAMS),
     carLights: structuredClone(DEFAULT_CAR_LIGHTS_PARAMS),
     ambient: structuredClone(DEFAULT_AMBIENT_SHADOW_PARAMS),
     logo: structuredClone(DEFAULT_LOGO_PARAMS),
+    dotGrid: structuredClone(DEFAULT_DOT_GRID_PARAMS),
     effects: structuredClone(DEFAULT_EFFECTS_PARAMS),
     customLights: [],
   };
@@ -89,9 +107,31 @@ export async function applySettings(
 
   assignDeep(viewer.carMaterials.params, settings.paint);
   assignDeep(viewer.softboxes.params, settings.softboxes);
+  assignDeep(viewer.roofStrobe.params, {
+    ...DEFAULT_ROOF_STROBE_PARAMS,
+    ...(settings.roofStrobe ?? {}),
+    flashIntensity: 0,
+    strobing: false,
+  });
+  viewer.roofStrobe.stopFlash();
   assignDeep(viewer.carLights.params, settings.carLights);
   assignDeep(viewer.ambientShadows.params, settings.ambient);
   assignDeep(viewer.logo.params, settings.logo);
+  {
+    const saved = settings.dotGrid;
+    // Migrate early/invisible placements (far + near-black panel from first shader pass).
+    const stale =
+      !saved ||
+      saved.distance >= 10 ||
+      saved.panelColor === '#050508' ||
+      saved.width <= 14;
+    assignDeep(
+      viewer.dotGrid.params,
+      stale
+        ? { ...DEFAULT_DOT_GRID_PARAMS, flash: 0 }
+        : { ...DEFAULT_DOT_GRID_PARAMS, ...saved, flash: 0 },
+    );
+  }
   assignDeep(viewer.effects.params, {
     ...settings.effects,
     // Don't restore a mid-flash peak
@@ -108,9 +148,11 @@ export async function applySettings(
   viewer.applyLighting();
   viewer.carMaterials.applyParams();
   viewer.softboxes.applyParams();
+  viewer.roofStrobe.applyParams();
   viewer.carLights.applyParams();
   viewer.ambientShadows.applyParams();
   viewer.logo.applyParams();
+  viewer.dotGrid.applyParams();
   viewer.effects.applyParams();
 }
 

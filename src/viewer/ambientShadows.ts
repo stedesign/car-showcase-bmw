@@ -190,34 +190,41 @@ export function createAmbientShadows(
     const hidden: { obj: THREE.Object3D; wasVisible: boolean }[] = [];
 
     group.visible = false;
+    // Do NOT hide the concrete ground here — that raced with car-hide and could
+    // leave the slab stuck invisible. Ground is already excluded via depth by
+    // sitting on y≈0 under the shadow camera near plane.
     for (const obj of hideWhileRendering) {
+      if (obj.name === 'Ground') continue;
       hidden.push({ obj, wasVisible: obj.visible });
       obj.visible = false;
     }
 
-    scene.background = null;
-    scene.overrideMaterial = depthMaterial;
-    renderer.setClearAlpha(0);
+    try {
+      scene.background = null;
+      scene.overrideMaterial = depthMaterial;
+      renderer.setClearAlpha(0);
 
-    renderer.setRenderTarget(renderTarget);
-    renderer.clear();
-    renderer.render(scene, shadowCamera);
+      renderer.setRenderTarget(renderTarget);
+      renderer.clear();
+      renderer.render(scene, shadowCamera);
 
-    scene.overrideMaterial = initialOverride;
+      scene.overrideMaterial = initialOverride;
 
-    const blur = blurAmount(params.radius);
-    blurShadow(renderer, blur);
-    // Second pass removes ringing artifacts (three.js contact-shadow example)
-    blurShadow(renderer, blur * 0.4);
+      const blur = blurAmount(params.radius);
+      blurShadow(renderer, blur);
+      // Second pass removes ringing artifacts (three.js contact-shadow example)
+      blurShadow(renderer, blur * 0.4);
+    } finally {
+      renderer.setRenderTarget(null);
+      renderer.setClearAlpha(initialClearAlpha);
+      scene.background = initialBackground;
+      scene.overrideMaterial = initialOverride;
 
-    renderer.setRenderTarget(null);
-    renderer.setClearAlpha(initialClearAlpha);
-    scene.background = initialBackground;
-
-    for (const { obj, wasVisible } of hidden) {
-      obj.visible = wasVisible;
+      for (const { obj, wasVisible } of hidden) {
+        obj.visible = wasVisible;
+      }
+      group.visible = params.enabled;
     }
-    group.visible = true;
   };
 
   const dispose = () => {

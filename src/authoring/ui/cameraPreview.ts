@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
-import type { Project, Selection } from '../project';
+import type { Scene, Selection } from '../project';
 
 const PREVIEW_W = 320;
 const PREVIEW_H = 180;
@@ -9,7 +9,7 @@ const PREVIEW_H = 180;
 export type CameraPreviewApi = {
   viewer: Viewer;
   cameras: CamerasHandle;
-  getProject: () => Project;
+  getScene: () => Scene;
   getSelection: () => Selection;
   select: (kind: Selection['kind'], id: string | null) => void;
   onChange: () => void;
@@ -159,7 +159,7 @@ export function mountCameraPreview(
     const clip = api.cameras.get(cameraId);
     if (!clip) return;
     api.cameras.setPlayCameraId(cameraId);
-    api.getProject().playCameraId = cameraId;
+    api.getScene().playCameraId = cameraId;
     api.cameras.lookThrough(cameraId);
     api.select('camera', cameraId);
     api.setStatus(`Using ${clip.name} as play camera`);

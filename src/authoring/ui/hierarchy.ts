@@ -5,20 +5,30 @@ import type { TextsHandle } from '../texts';
 import {
   CAR_ID,
   CAR_LIGHTS_ID,
+  DOT_GRID_ID,
   FREE_CAMERA_ID,
+  LIGHTING_ID,
+  ROOF_STROBE_ID,
   type Project,
+  type Scene,
   type Selection,
 } from '../project';
 
 export type HierarchyApi = {
   viewer: Viewer;
   getProject: () => Project;
+  getScene: () => Scene;
   getSelection: () => Selection;
   select: (kind: Selection['kind'], id: string | null) => void;
   cameras: CamerasHandle;
   planes: PlanesHandle;
   texts: TextsHandle;
   onChange: () => void;
+  onSelectScene?: (sceneId: string) => void;
+  onAddScene?: () => void;
+  onDuplicateScene?: () => void;
+  onDeleteScene?: (sceneId: string) => void;
+  onRenameScene?: (sceneId: string, name: string) => void;
 };
 
 function section(
@@ -72,17 +82,88 @@ function section(
 export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
   host.replaceChildren();
   const project = api.getProject();
+  const scene = api.getScene();
   const sel = api.getSelection();
 
   const scenes = document.createElement('div');
   scenes.className = 'ed-section';
-  scenes.innerHTML = `
-    <div class="ed-section-title"><span>Scenes</span></div>
-    <div class="ed-section-body">
-      <button class="ed-tree-item active" type="button">
-        <span class="tag">scene</span><span>Scene 1</span>
-      </button>
-    </div>`;
+  const scenesHead = document.createElement('div');
+  scenesHead.className = 'ed-section-title';
+  const scenesTitle = document.createElement('span');
+  scenesTitle.textContent = 'Scenes';
+  const scenesBtns = document.createElement('div');
+  scenesBtns.className = 'ed-row';
+  scenesBtns.style.margin = '0';
+  if (api.onAddScene) {
+    const addBtn = document.createElement('button');
+    addBtn.className = 'ed-btn';
+    addBtn.type = 'button';
+    addBtn.textContent = '+';
+    addBtn.title = 'Add scene';
+    addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      api.onAddScene?.();
+    });
+    scenesBtns.append(addBtn);
+  }
+  if (api.onDuplicateScene) {
+    const dupBtn = document.createElement('button');
+    dupBtn.className = 'ed-btn';
+    dupBtn.type = 'button';
+    dupBtn.textContent = 'Dup';
+    dupBtn.title = 'Duplicate active scene';
+    dupBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      api.onDuplicateScene?.();
+    });
+    scenesBtns.append(dupBtn);
+  }
+  scenesHead.append(scenesTitle, scenesBtns);
+  const scenesBody = document.createElement('div');
+  scenesBody.className = 'ed-section-body';
+  for (const s of project.scenes) {
+    const row = document.createElement('div');
+    row.className = `ed-tree-item${s.id === scene.id ? ' active' : ''}`;
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = 'scene';
+    const name = document.createElement('span');
+    name.textContent = s.name;
+    name.style.flex = '1';
+    name.style.textAlign = 'left';
+    row.append(tag, name);
+    const activate = () => api.onSelectScene?.(s.id);
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        activate();
+      }
+    });
+    row.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      if (!api.onRenameScene) return;
+      const next = window.prompt('Scene name', s.name);
+      if (next != null && next.trim()) api.onRenameScene(s.id, next.trim());
+    });
+    if (api.onDeleteScene && project.scenes.length > 1) {
+      const del = document.createElement('button');
+      del.className = 'ed-btn';
+      del.type = 'button';
+      del.textContent = '×';
+      del.title = 'Delete scene';
+      del.style.padding = '0 4px';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (window.confirm(`Delete “${s.name}”?`)) api.onDeleteScene?.(s.id);
+      });
+      row.append(del);
+    }
+    scenesBody.append(row);
+  }
+  scenes.append(scenesHead, scenesBody);
   host.append(scenes);
 
   host.append(
@@ -94,8 +175,10 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
           onClick: () => {
             const next = !api.viewer.carVisible;
             api.viewer.setCarVisible(next);
-            project.carVisible = next;
+            scene.carVisible = next;
             api.onChange();
+            // Rebuild hierarchy so Hide/Show + "(hidden)" update immediately.
+            renderHierarchy(host, api);
           },
         },
       ],
@@ -127,7 +210,7 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
           onClick: () => {
             api.cameras.enterFree();
             const clip = api.cameras.add();
-            project.cameras = api.cameras.clips.map((c) => structuredClone(c));
+            scene.cameras = api.cameras.clips.map((c) => structuredClone(c));
             api.select('camera', clip.id);
             api.onChange();
           },
@@ -182,10 +265,28 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
       ],
       [
         {
+          id: LIGHTING_ID,
+          label: 'Lighting',
+          kind: 'lighting' as const,
+          active: sel.kind === 'lighting' && sel.id === LIGHTING_ID,
+        },
+        {
           id: CAR_LIGHTS_ID,
           label: 'Car Lights',
           kind: 'carLights' as const,
           active: sel.kind === 'carLights' && sel.id === CAR_LIGHTS_ID,
+        },
+        {
+          id: ROOF_STROBE_ID,
+          label: 'Roof Strobe',
+          kind: 'roofStrobe' as const,
+          active: sel.kind === 'roofStrobe' && sel.id === ROOF_STROBE_ID,
+        },
+        {
+          id: DOT_GRID_ID,
+          label: 'Dot Grid WRT',
+          kind: 'dotGrid' as const,
+          active: sel.kind === 'dotGrid' && sel.id === DOT_GRID_ID,
         },
         ...api.viewer.customLights.entries.map((e) => ({
           id: e.id,
@@ -206,7 +307,7 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
           label: '+',
           onClick: () => {
             const plane = api.planes.add();
-            project.planes = api.planes.serialize();
+            scene.planes = api.planes.serialize();
             api.select('plane', plane.id);
             api.onChange();
           },
@@ -230,7 +331,7 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
           label: '+',
           onClick: () => {
             const text = api.texts.add();
-            project.texts = api.texts.serialize();
+            scene.texts = api.texts.serialize();
             api.select('text', text.id);
             api.onChange();
           },

@@ -4,7 +4,7 @@ import type {
   EasingName,
   Keyframe,
   KeyframeValue,
-  Project,
+  Scene,
   TimelineTrack,
   Vec3,
 } from './project';
@@ -29,7 +29,10 @@ export type TimelineEngine = {
   setApply: (fn: TimelineApplyFn) => void;
   setOnEnded: (fn: (() => void) | null) => void;
   setOnTime: (fn: ((t: number) => void) | null) => void;
-  bindProject: (project: Project) => void;
+  /** Bind a scene document (duration + tracks). */
+  bindScene: (scene: Scene) => void;
+  /** @deprecated alias for bindScene */
+  bindProject: (scene: Scene) => void;
   ensureTrack: (target: string) => TimelineTrack;
   setKeyframe: (target: string, t: number, value: KeyframeValue, easing?: EasingName) => void;
   setKeyframeBezier: (trackId: string, t: number, bezier: CubicBezier) => void;
@@ -92,6 +95,7 @@ function interpolate(
   a: Keyframe,
   b: Keyframe | undefined,
   t: number,
+  target?: string,
 ): KeyframeValue {
   if (!b || t <= a.t) return structuredClone(a.value) as KeyframeValue;
   if (t >= b.t) return structuredClone(b.value) as KeyframeValue;
@@ -107,6 +111,15 @@ function interpolate(
 
   const va = a.value;
   const vb = b.value;
+
+  // Discrete effect modes should cut, not blend through neighbors.
+  if (
+    target?.endsWith('.effectMode') &&
+    typeof va === 'number' &&
+    typeof vb === 'number'
+  ) {
+    return u < 1 ? va : vb;
+  }
 
   if (typeof va === 'number' && typeof vb === 'number') {
     return lerpNumber(va, vb, u);
@@ -131,7 +144,7 @@ function sortKeys(track: TimelineTrack) {
 }
 
 export function createTimelineEngine(initialDuration = 8): TimelineEngine {
-  let project: Project | null = null;
+  let scene: Scene | null = null;
   let time = 0;
   let duration = initialDuration;
   let state: TimelineState = 'idle';
@@ -139,7 +152,7 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
   let onEnded: (() => void) | null = null;
   let onTime: ((t: number) => void) | null = null;
 
-  const tracks = (): TimelineTrack[] => project?.timeline.tracks ?? [];
+  const tracks = (): TimelineTrack[] => scene?.timeline.tracks ?? [];
 
   const evaluateAt = (t: number) => {
     time = Math.min(duration, Math.max(0, t));
@@ -160,7 +173,7 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
       }
       let i = 0;
       while (i < keys.length - 1 && keys[i + 1].t < time) i += 1;
-      const value = interpolate(keys[i], keys[i + 1], time);
+      const value = interpolate(keys[i], keys[i + 1], time, track.target);
       applyFn(track.target, value);
     }
     onTime?.(time);
@@ -178,7 +191,7 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
     },
     setDuration(seconds: number) {
       duration = Math.max(0.5, seconds);
-      if (project) project.duration = duration;
+      if (scene) scene.duration = duration;
       if (time > duration) evaluateAt(duration);
     },
     seek(t: number) {
@@ -216,17 +229,20 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
     setOnTime(fn) {
       onTime = fn;
     },
-    bindProject(p) {
-      project = p;
-      duration = p.duration;
+    bindScene(s) {
+      scene = s;
+      duration = s.duration;
       time = Math.min(time, duration);
     },
+    bindProject(s) {
+      this.bindScene(s);
+    },
     ensureTrack(target: string) {
-      if (!project) throw new Error('No project bound');
-      let track = project.timeline.tracks.find((tr) => tr.target === target);
+      if (!scene) throw new Error('No scene bound');
+      let track = scene.timeline.tracks.find((tr) => tr.target === target);
       if (!track) {
         track = { id: nextAuthoringId('track'), target, keyframes: [] };
-        project.timeline.tracks.push(track);
+        scene.timeline.tracks.push(track);
       }
       return track;
     },
@@ -253,8 +269,8 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
       sortKeys(track);
     },
     setKeyframeBezier(trackId, t, bezier) {
-      if (!project) return;
-      const track = project.timeline.tracks.find((tr) => tr.id === trackId);
+      if (!scene) return;
+      const track = scene.timeline.tracks.find((tr) => tr.id === trackId);
       if (!track) return;
       const key = track.keyframes.find((k) => Math.abs(k.t - t) < 1e-3);
       if (!key) return;
@@ -262,14 +278,14 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
       key.easing = 'easeInOut';
     },
     removeKeyframe(trackId, t) {
-      if (!project) return;
-      const track = project.timeline.tracks.find((tr) => tr.id === trackId);
+      if (!scene) return;
+      const track = scene.timeline.tracks.find((tr) => tr.id === trackId);
       if (!track) return;
       track.keyframes = track.keyframes.filter((k) => Math.abs(k.t - t) > 1e-3);
     },
     moveKeyframe(trackId, fromT, toT) {
-      if (!project) return;
-      const track = project.timeline.tracks.find((tr) => tr.id === trackId);
+      if (!scene) return;
+      const track = scene.timeline.tracks.find((tr) => tr.id === trackId);
       if (!track) return;
       const key = track.keyframes.find((k) => Math.abs(k.t - fromT) < 1e-3);
       if (!key) return;

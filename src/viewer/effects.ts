@@ -55,6 +55,13 @@ export type EffectsHandle = {
   fogPlanes: THREE.Group;
   flashLight: THREE.PointLight;
   applyParams: () => void;
+  /** Lightweight preview: skip bloom / smoke / grain / vignette without mutating saved params. */
+  setDraftMode: (on: boolean) => void;
+  /**
+   * Empty-garage look: keep bloom for the WRT mark, but kill vignette / smoke / fog
+   * that dissolve the concrete slab into the black void.
+   */
+  setEmptyGarageFx: (on: boolean) => void;
   triggerFlash: (peak?: number) => void;
   resize: (width: number, height: number) => void;
   update: (dt: number, elapsed: number) => void;
@@ -463,17 +470,21 @@ export function createEffects(
 
   scene.fog = new THREE.FogExp2(FOG_COLOR, params.fogDensity);
 
+  let draftMode = false;
+  let emptyGarageFx = false;
+
   const applyParams = () => {
-    bloomPass.enabled = params.bloomEnabled;
+    const fxOn = !draftMode;
+    bloomPass.enabled = fxOn && params.bloomEnabled;
     bloomPass.strength = params.bloomStrength;
     bloomPass.radius = params.bloomRadius;
     bloomPass.threshold = params.bloomThreshold;
 
-    vignettePass.enabled = params.vignetteEnabled;
+    vignettePass.enabled = fxOn && params.vignetteEnabled && !emptyGarageFx;
     vignettePass.uniforms['darkness'].value = params.vignetteDarkness;
     vignettePass.uniforms['offset'].value = params.vignetteOffset;
 
-    const on = params.smokeEnabled;
+    const on = fxOn && params.smokeEnabled && !emptyGarageFx;
     smoke.visible = on;
     fogPlanes.visible = on;
 
@@ -496,13 +507,26 @@ export function createEffects(
     });
 
     if (scene.fog instanceof THREE.FogExp2) {
-      scene.fog.density = params.fogDensity;
+      scene.fog.density = draftMode || emptyGarageFx ? 0 : params.fogDensity;
       scene.fog.color.setHex(FOG_COLOR);
     }
 
-    grainPass.enabled = params.grainEnabled && params.grainStrength > 0.001;
+    grainPass.enabled =
+      fxOn && params.grainEnabled && params.grainStrength > 0.001;
     grainPass.uniforms['amount'].value = params.grainStrength;
     grainPass.uniforms['enabled'].value = grainPass.enabled ? 1 : 0;
+  };
+
+  const setDraftMode = (on: boolean) => {
+    if (draftMode === on) return;
+    draftMode = on;
+    applyParams();
+  };
+
+  const setEmptyGarageFx = (on: boolean) => {
+    if (emptyGarageFx === on) return;
+    emptyGarageFx = on;
+    applyParams();
   };
 
   const triggerFlash = (peak = 12) => {
@@ -530,7 +554,7 @@ export function createEffects(
   const update = (dt: number, elapsed: number) => {
     grainPass.uniforms['time'].value = elapsed;
 
-    if (params.smokeEnabled) {
+    if (!draftMode && params.smokeEnabled) {
       const speed = params.smokeSpeed;
 
       for (const b of billboards) {
@@ -590,9 +614,9 @@ export function createEffects(
 
   const render = () => {
     if (
-      params.bloomEnabled ||
-      params.vignetteEnabled ||
-      (params.grainEnabled && params.grainStrength > 0.001)
+      bloomPass.enabled ||
+      vignettePass.enabled ||
+      grainPass.enabled
     ) {
       composer.render();
     } else {
@@ -609,6 +633,8 @@ export function createEffects(
     fogPlanes,
     flashLight,
     applyParams,
+    setDraftMode,
+    setEmptyGarageFx,
     triggerFlash,
     resize,
     update,

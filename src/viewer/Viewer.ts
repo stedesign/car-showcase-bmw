@@ -8,6 +8,10 @@ import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { createGround, type GroundHandle } from './ground';
 import { createWrtLogo, type WrtLogoHandle } from './wrtLogo';
+import {
+  createDottedWrtScreen,
+  type DottedWrtScreenHandle,
+} from './dottedWrtScreen';
 import { createEffects, type EffectsHandle } from './effects';
 import { createCustomLights, type CustomLightsHandle } from './customLights';
 import { createCarLights, type CarLightsHandle } from './carLights';
@@ -17,6 +21,7 @@ import {
 } from './ambientShadows';
 import { createCarMaterials, type CarMaterialsHandle } from './carMaterials';
 import { createSoftboxes, type SoftboxesHandle } from './softboxes';
+import { createRoofStrobe, type RoofStrobeHandle } from './roofStrobe';
 
 export type ViewerDisplay = {
   background: boolean;
@@ -127,12 +132,14 @@ export class Viewer {
 
   ground!: GroundHandle;
   logo!: WrtLogoHandle;
+  dotGrid!: DottedWrtScreenHandle;
   effects!: EffectsHandle;
   customLights!: CustomLightsHandle;
   carLights!: CarLightsHandle;
   ambientShadows!: AmbientShadowsHandle;
   carMaterials!: CarMaterialsHandle;
   softboxes!: SoftboxesHandle;
+  roofStrobe!: RoofStrobeHandle;
 
   private container: HTMLElement;
   private modelRoot = new THREE.Group();
@@ -250,6 +257,8 @@ export class Viewer {
     this.carMaterials = createCarMaterials();
     this.softboxes = createSoftboxes();
     this.scene.add(this.softboxes.group);
+    this.roofStrobe = createRoofStrobe();
+    this.scene.add(this.roofStrobe.group);
 
     window.addEventListener('resize', this.onResize);
   }
@@ -272,6 +281,9 @@ export class Viewer {
     this.logo = await createWrtLogo('/brand/wrt-logo.png');
     this.scene.add(this.logo.group);
     this.logo.bindReflector(this.ground.reflector);
+
+    this.dotGrid = await createDottedWrtScreen('/brand/wrt-logo.png');
+    this.scene.add(this.dotGrid.group);
 
     await this.applyEnvironment();
     this.applyLighting();
@@ -297,6 +309,12 @@ export class Viewer {
 
   setCarVisible(visible: boolean) {
     this.carVisible = visible;
+    this.carLights?.setCarVisible(visible);
+    // Floor is independent of the car — force a readable concrete slab when
+    // the vehicle (and its lights) are off so the viewport isn't a black void.
+    this.ground?.setEmptyGarage(!visible);
+    // Kill vignette / smoke / fog that crush the slab when looking at the WRT wall.
+    this.effects?.setEmptyGarageFx(!visible);
   }
 
   setGuiVisible(visible: boolean) {
@@ -391,7 +409,7 @@ export class Viewer {
     this.carMaterials.enhance(root);
     // Frame onto the floor first so ground-glow anchors sit correctly.
     this.frameObject(this.modelRoot);
-    this.carLights.bind(root);
+    this.carLights.bind(root, this.scene);
     this.setStatus(`Loaded ${nameHint ?? 'model'}`);
   }
 
@@ -436,6 +454,7 @@ export class Viewer {
     }
 
     this.softboxes?.setTarget(center, this.contentRadius);
+    this.roofStrobe?.setFromCarBounds(box);
   }
 
   applyDisplay() {
@@ -579,6 +598,30 @@ export class Viewer {
     this.gridHelper.visible = visible;
   }
 
+  /** Point the free camera at the dotted WRT wall screen. */
+  frameDotGridScreen() {
+    if (!this.dotGrid) return;
+    // Ensure latest placement/visibility before framing.
+    this.dotGrid.params.enabled = true;
+    this.dotGrid.applyParams();
+    const center = this.dotGrid.getWorldCenter();
+    const p = this.dotGrid.params;
+    const halfH = (p.heightWorld * Math.max(0.05, p.scale)) * 0.5;
+    const dist = Math.max(
+      5,
+      halfH / Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.38)),
+    );
+    this.controls.target.copy(center);
+    // Stand in front of the wall (positive Z), looking toward -Z.
+    this.camera.position.set(center.x, center.y, center.z + dist);
+    this.camera.up.set(0, 1, 0);
+    this.camera.near = 0.05;
+    this.camera.far = 200;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(center);
+    this.controls.update();
+  }
+
   private onResize = () => {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
@@ -598,17 +641,30 @@ export class Viewer {
       this.controls.update();
       this.customLights?.update();
       this.logo?.update(elapsed);
+      this.dotGrid?.update(dt, elapsed);
+      this.roofStrobe?.update(dt);
       this.effects.update(dt, elapsed);
-      this.ambientShadows?.update(this.renderer, this.scene, [
-        this.ground?.group,
-        this.logo?.group,
-        this.effects?.smoke,
-        this.effects?.fogPlanes,
-        this.effects?.flashLight,
-        this.softboxes?.group,
-        this.gridHelper,
-        ...this.extraShadowExcludes,
-      ].filter(Boolean) as THREE.Object3D[]);
+      if (this.carVisible) {
+        this.ambientShadows?.update(this.renderer, this.scene, [
+          // Ground stays visible — hiding it during capture could stick it off.
+          this.logo?.group,
+          this.dotGrid?.group,
+          this.effects?.smoke,
+          this.effects?.fogPlanes,
+          this.effects?.flashLight,
+          this.softboxes?.group,
+          this.roofStrobe?.group,
+          this.gridHelper,
+          ...this.extraShadowExcludes,
+        ].filter(Boolean) as THREE.Object3D[]);
+      } else if (this.ground) {
+        // Contact-shadow pass temporarily hides the ground — if the car was
+        // toggled off mid-pass (or a restore was skipped), force the slab back.
+        this.ambientShadows && (this.ambientShadows.group.visible = false);
+        this.ground.group.visible = true;
+        this.ground.setEmptyGarage(true);
+        this.effects?.setEmptyGarageFx(true);
+      }
       this.effects.render();
       this.postRender?.();
     };
@@ -622,6 +678,7 @@ export class Viewer {
     this.customLights?.dispose();
     this.carLights?.dispose();
     this.softboxes?.dispose();
+    this.roofStrobe?.dispose();
     this.controls.dispose();
     this.renderer.dispose();
     for (const entry of this.hdrCache.values()) {

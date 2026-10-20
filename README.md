@@ -21,11 +21,22 @@ Drag-and-drop another `.glb` / `.gltf` onto the window to swap models.
 
 | Panel | What it does |
 |--------|----------------|
-| **Left** | Scene hierarchy — cameras, custom lights, occluder planes, texts |
+| **Left** | Scenes list (add / duplicate / delete) + hierarchy — cameras, lights, planes, texts |
 | **Center** | 3D viewport (orbit when not playing) |
 | **Right** | Selection inspector + Look sections (display, softboxes, paint, FX, logo) |
-| **Bottom** | Multi-track timeline — scrub, play, keyframes |
-| **Top** | Save / Export / Import project JSON, Record commercial |
+| **Bottom** | **Scene mode:** multi-track timeline. **Master mode:** clip strip that sequences scenes |
+| **Top** | Scene / Master toggle, Save / Export / Import JSON, Preview, Record |
+
+## Scenes + master
+
+Projects are **version 3**: any number of scenes, each with its own look, cameras, and timeline. The **master** sequence is an ordered list of clips (scene + in/out) that assemble the final commercial.
+
+1. Edit shots in **Scene** mode (Cut / Animate on the scene timeline).
+2. Add more scenes from the left panel (**+** / **Dup**).
+3. Switch to **Master**, add clips, reorder / trim, then **Preview** or **Record**.
+4. Record in Master mode exports the full sequence; Record in Scene mode exports only the active scene.
+
+Older v2 project JSON files migrate automatically on import / load.
 
 ## Authoring a commercial
 
@@ -33,7 +44,7 @@ Drag-and-drop another `.glb` / `.gltf` onto the window to swap models.
 2. Add spot lights and matte **planes** for shadow wipes (planes cast shadows; softboxes are look-dev only).
 3. Add **text** (presets from car specs) — rendered in-canvas so it appears in the MP4.
 4. Scrub the playhead → **Cut** (switch camera) or **Animate** (move within a shot).
-5. **Play** to preview → **Record** to play from `t=0` and export `bmw-m-hybrid-v8-wrt.mp4`.
+5. Build the **Master** sequence → **Play** / **Preview** → **Record** to export `bmw-m-hybrid-v8-wrt.mp4`.
 
 Projects autosave to `localStorage` (`wrt-paddock-project`). Use **Export JSON** for backups.
 

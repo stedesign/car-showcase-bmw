@@ -197,6 +197,61 @@ export function createGui(
     .onChange(() => viewer.softboxes.applyParams());
   softboxFolder.open();
 
+  const roofFolder = gui.addFolder('Roof Strobe');
+  const roof = viewer.roofStrobe.params;
+  roofFolder
+    .add(roof, 'enabled')
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'intensity', 0, 30, 0.05)
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .addColor(roof, 'color')
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'flashDuration', 1, 10, 0.1)
+    .name('duration (s)')
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'strobeHz', 1, 16, 0.1)
+    .name('strobe Hz')
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'strobeDuty', 0.1, 0.9, 0.01)
+    .name('duty')
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'strobing')
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'width', 0.3, 3, 0.01)
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'length', 0.5, 8, 0.05)
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'thickness', 0.04, 0.5, 0.01)
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'yOffset', 0.1, 3, 0.01)
+    .name('height')
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder
+    .add(roof, 'zOffset', -2, 2, 0.01)
+    .onChange(() => viewer.roofStrobe.applyParams());
+  roofFolder.add(roof, 'flashDecay', 0.5, 14, 0.1);
+  const roofActions = {
+    triggerStrobe: () => viewer.roofStrobe.triggerFlash(roof.flashDuration),
+    stop: () => {
+      viewer.roofStrobe.stopFlash();
+      roof.strobing = false;
+      viewer.roofStrobe.applyParams();
+    },
+  };
+  roofFolder.add(roofActions, 'triggerStrobe').name('Trigger strobe');
+  roofFolder.add(roofActions, 'stop').name('Stop');
+  roofFolder.open();
+
   const carLightsFolder = gui.addFolder('Car Lights');
   const carLights = viewer.carLights.params;
   carLightsFolder
@@ -486,6 +541,80 @@ export function createGui(
   logoFolder.add(presets, 'paddockPulse').name('Preset: Paddock pulse');
   logoFolder.add(presets, 'strobeFlash').name('Preset: Strobe flash');
 
+  const dotFolder = gui.addFolder('Dot Grid WRT');
+  const dg = viewer.dotGrid.params;
+  const applyDg = () => viewer.dotGrid.applyParams();
+  dotFolder.add(dg, 'enabled').onChange(applyDg);
+  dotFolder
+    .add(dg, 'effectMode', {
+      Idle: 0,
+      Wave: 1,
+      Scan: 2,
+      Rain: 3,
+      Sparkle: 4,
+      Breathe: 5,
+      'Shock loop': 6,
+      'Reveal loop': 7,
+    })
+    .name('effect')
+    .onChange(applyDg);
+  dotFolder.add(dg, 'effectStrength', 0, 2, 0.01).name('effectStrength').onChange(applyDg);
+  dotFolder.add(dg, 'opacity', 0, 1, 0.01).onChange(applyDg);
+  dotFolder.add(dg, 'reveal', 0, 1, 0.01).onChange(applyDg);
+  dotFolder.add(dg, 'pulse', 0, 2, 0.01).onChange(applyDg);
+  dotFolder.add(dg, 'pulseHz', 0.1, 4, 0.05).onChange(applyDg);
+  dotFolder.add(dg, 'wave', 0, 2, 0.01).onChange(applyDg);
+  dotFolder.add(dg, 'waveSpeed', 0.1, 4, 0.05).onChange(applyDg);
+  dotFolder.add(dg, 'glow', 0, 2, 0.01).onChange(applyDg);
+  dotFolder.add(dg, 'flashDecay', 0.5, 8, 0.1);
+  dotFolder.add(dg, 'dotSize', 0.1, 0.9, 0.01).onChange(applyDg);
+  dotFolder.add(dg, 'density', 24, 160, 1).onChange(applyDg);
+  dotFolder.addColor(dg, 'baseColor').onChange(applyDg);
+  dotFolder.addColor(dg, 'activeColor').onChange(applyDg);
+  dotFolder.addColor(dg, 'panelColor').onChange(applyDg);
+  dotFolder.add(dg, 'distance', 4, 24, 0.1).onChange(applyDg);
+  dotFolder.add(dg, 'height', 0.5, 8, 0.05).onChange(applyDg);
+  dotFolder.add(dg, 'scale', 0.3, 3, 0.05).onChange(applyDg);
+  dotFolder.add(dg, 'width', 4, 24, 0.1).onChange(applyDg);
+  dotFolder.add(dg, 'heightWorld', 2, 14, 0.1).name('planeHeight').onChange(applyDg);
+  dotFolder
+    .add(dg, 'reflectionEnabled')
+    .name('floor reflection')
+    .onChange(applyDg);
+  dotFolder
+    .add(dg, 'reflectionOpacity', 0, 1, 0.01)
+    .name('reflect opacity')
+    .onChange(applyDg);
+  dotFolder
+    .add(dg, 'reflectionFade', 0, 1, 0.01)
+    .name('reflect fade')
+    .onChange(applyDg);
+  dotFolder
+    .add(dg, 'reflectionLength', 0.5, 8, 0.05)
+    .name('reflect length')
+    .onChange(applyDg);
+  const dgActions = {
+    frame: () => viewer.frameDotGridScreen(),
+    flash: () => viewer.dotGrid.triggerFlash(1.35),
+    idle: () => {
+      viewer.dotGrid.applyPreset('idle');
+      refreshGui();
+    },
+    pulse: () => {
+      viewer.dotGrid.applyPreset('pulse');
+      refreshGui();
+    },
+    shockwave: () => {
+      viewer.dotGrid.applyPreset('shockwave');
+      refreshGui();
+    },
+  };
+  dotFolder.add(dgActions, 'frame').name('Frame screen');
+  dotFolder.add(dgActions, 'flash').name('Trigger flash');
+  dotFolder.add(dgActions, 'idle').name('Preset: Idle');
+  dotFolder.add(dgActions, 'pulse').name('Preset: Pulse');
+  dotFolder.add(dgActions, 'shockwave').name('Preset: Shockwave');
+
   const fxFolder = gui.addFolder('FX');
   const fx = viewer.effects.params;
   fxFolder.add(fx, 'bloomEnabled').name('bloom').onChange(() => viewer.effects.applyParams());
@@ -590,6 +719,7 @@ export function createGui(
   ambientFolder.open();
   customLightsFolder.open();
   logoFolder.open();
+  dotFolder.open();
   fxFolder.open();
   recordFolder.open();
 

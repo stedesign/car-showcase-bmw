@@ -2,11 +2,12 @@ import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
 import type { PlanesHandle } from '../planes';
 import type { TextsHandle } from '../texts';
-import type { Project, Selection } from '../project';
+import type { EditorMode, Project, Scene, Selection } from '../project';
 import type { TimelineEngine } from '../timeline';
 import { renderHierarchy } from './hierarchy';
 import { renderInspector } from './inspector';
 import { mountTimelineUi, type TimelineUiHandle } from './timelineUi';
+import { mountMasterUi, type MasterUiHandle } from './masterUi';
 import {
   mountCameraPreview,
   type CameraPreviewHandle,
@@ -17,12 +18,16 @@ import '../editor.css';
 export type EditorShellOptions = {
   viewer: Viewer;
   getProject: () => Project;
+  getScene: () => Scene;
   getSelection: () => Selection;
   select: (kind: Selection['kind'], id: string | null) => void;
   cameras: CamerasHandle;
   planes: PlanesHandle;
   texts: TextsHandle;
   timeline: TimelineEngine;
+  getMasterTime: () => number;
+  getMasterDuration: () => number;
+  isMasterPlaying: () => boolean;
   onCut: () => void;
   onAnimate: () => void;
   onPlay: () => void;
@@ -38,6 +43,12 @@ export type EditorShellOptions = {
   onTogglePreview: () => void;
   /** Called after project-mutating UI edits (feeds undo history). */
   onEdit: () => void;
+  onSetEditorMode: (mode: EditorMode) => void;
+  onSelectScene: (sceneId: string) => void;
+  onAddScene: () => void;
+  onDuplicateScene: () => void;
+  onDeleteScene: (sceneId: string) => void;
+  onRenameScene: (sceneId: string, name: string) => void;
   setStatus: (msg: string) => void;
   isRecording: () => boolean;
   isPreviewing: () => boolean;
@@ -83,6 +94,16 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     importInput.value = '';
   });
 
+  const modeSceneBtn = mkBtn('Scene', 'ed-mode-btn', () => {
+    opts.onSetEditorMode('scene');
+  });
+  const modeMasterBtn = mkBtn('Master', 'ed-mode-btn', () => {
+    opts.onSetEditorMode('master');
+  });
+  const modeGroup = document.createElement('div');
+  modeGroup.className = 'ed-mode-toggle';
+  modeGroup.append(modeSceneBtn, modeMasterBtn);
+
   const recordBtn = mkBtn('● Record', 'record', () => {
     if (opts.isRecording()) void opts.onStopRecord();
     else opts.onRecord();
@@ -100,6 +121,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
 
   top.append(
     brand,
+    modeGroup,
     mkBtn('Save', '', opts.onSave),
     mkBtn('Export JSON', '', opts.onExport),
     mkBtn('Import JSON', '', () => importInput.click()),
@@ -123,8 +145,13 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
   previewTime.className = 'ed-preview-hud-time';
   previewTime.textContent = '0:00.00';
 
+  const isPlaying = () =>
+    opts.getProject().editorMode === 'master'
+      ? opts.isMasterPlaying()
+      : opts.timeline.state === 'playing';
+
   const previewPlayBtn = mkBtn('Play', 'ed-preview-hud-btn', () => {
-    if (opts.timeline.state === 'playing') opts.onPause();
+    if (isPlaying()) opts.onPause();
     else opts.onPlay();
     refreshPreviewHud();
   });
@@ -160,6 +187,9 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
   camFrame.hidden = true;
   const timelineHost = document.createElement('div');
   timelineHost.className = 'ed-timeline';
+  const timelineContent = document.createElement('div');
+  timelineContent.className = 'ed-timeline-content';
+  timelineHost.append(timelineContent);
 
   const TL_HEIGHT_KEY = 'wrt-director-timeline-h';
   const TL_MIN = 120;
@@ -188,7 +218,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
   const cameraPreview: CameraPreviewHandle = mountCameraPreview(viewport, {
     viewer: opts.viewer,
     cameras: opts.cameras,
-    getProject: opts.getProject,
+    getScene: opts.getScene,
     getSelection: opts.getSelection,
     select: opts.select,
     onChange: () => onEdit(),
@@ -200,7 +230,6 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     cameras: opts.cameras,
     setStatus: opts.setStatus,
     onSnap: () => {
-      // Leaving a through-camera via axis snap updates chrome / hierarchy.
       refresh();
     },
   });
@@ -224,27 +253,73 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     }
   };
 
-  let timelineUi: TimelineUiHandle;
+  let timelineUi: TimelineUiHandle | null = null;
+  let masterUi: MasterUiHandle | null = null;
+  let bottomMode: EditorMode | null = null;
 
   const onEdit = () => {
     opts.onEdit();
     refresh();
   };
 
+  const ensureBottomUi = () => {
+    const mode = opts.getProject().editorMode;
+    if (mode === bottomMode && (timelineUi || masterUi)) return;
+
+    timelineUi = null;
+    masterUi = null;
+    bottomMode = mode;
+
+    if (mode === 'master') {
+      masterUi = mountMasterUi(timelineContent, {
+        getProject: opts.getProject,
+        getTime: opts.getMasterTime,
+        getPlaying: opts.isMasterPlaying,
+        onPlay: opts.onPlay,
+        onPause: opts.onPause,
+        onStop: opts.onStop,
+        onSeek: opts.onSeek,
+        onChange: onEdit,
+        setStatus: opts.setStatus,
+      });
+    } else {
+      timelineUi = mountTimelineUi(timelineContent, {
+        getScene: opts.getScene,
+        getSelection: opts.getSelection,
+        timeline: opts.timeline,
+        onPlay: opts.onPlay,
+        onPause: opts.onPause,
+        onStop: opts.onStop,
+        onSeek: opts.onSeek,
+        onCut: opts.onCut,
+        onAnimate: opts.onAnimate,
+        onChange: onEdit,
+      });
+    }
+  };
+
   const refresh = () => {
+    ensureBottomUi();
     renderHierarchy(left, {
       viewer: opts.viewer,
       getProject: opts.getProject,
+      getScene: opts.getScene,
       getSelection: opts.getSelection,
       select: opts.select,
       cameras: opts.cameras,
       planes: opts.planes,
       texts: opts.texts,
       onChange: onEdit,
+      onSelectScene: opts.onSelectScene,
+      onAddScene: opts.onAddScene,
+      onDuplicateScene: opts.onDuplicateScene,
+      onDeleteScene: opts.onDeleteScene,
+      onRenameScene: opts.onRenameScene,
     });
     renderInspector(right, {
       viewer: opts.viewer,
       getProject: opts.getProject,
+      getScene: opts.getScene,
       getSelection: opts.getSelection,
       cameras: opts.cameras,
       planes: opts.planes,
@@ -253,7 +328,8 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       onLookEdit: opts.onEdit,
       setStatus: opts.setStatus,
     });
-    timelineUi.refresh();
+    timelineUi?.refresh();
+    masterUi?.refresh();
     cameraPreview.refresh();
     refreshTop();
     syncCameraChrome();
@@ -267,13 +343,24 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
   };
 
   const refreshPreviewHud = () => {
-    const playing = opts.timeline.state === 'playing';
+    const master = opts.getProject().editorMode === 'master';
+    const playing = isPlaying();
     previewPlayBtn.textContent = playing ? 'Pause' : 'Play';
-    previewTime.textContent = `${formatPreviewTime(opts.timeline.time)} / ${formatPreviewTime(opts.timeline.duration)}`;
+    const t = master ? opts.getMasterTime() : opts.timeline.time;
+    const d = master ? opts.getMasterDuration() : opts.timeline.duration;
+    previewTime.textContent = `${formatPreviewTime(t)} / ${formatPreviewTime(d)}`;
+    previewLabel.textContent = master ? 'Master preview' : 'Preview';
   };
 
   const refreshTop = () => {
+    const mode = opts.getProject().editorMode;
+    modeSceneBtn.classList.toggle('active', mode === 'scene');
+    modeMasterBtn.classList.toggle('active', mode === 'master');
     recordBtn.textContent = opts.isRecording() ? '■ Stop & export' : '● Record';
+    recordBtn.title =
+      mode === 'master'
+        ? 'Record the master sequence'
+        : 'Record the active scene only';
     const previewing = opts.isPreviewing();
     previewBtn.classList.toggle('active', previewing);
     previewBtn.textContent = previewing ? 'Exit preview' : 'Preview';
@@ -282,20 +369,6 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     refreshPreviewHud();
   };
 
-  timelineUi = mountTimelineUi(timelineHost, {
-    getProject: opts.getProject,
-    getSelection: opts.getSelection,
-    timeline: opts.timeline,
-    onPlay: opts.onPlay,
-    onPause: opts.onPause,
-    onStop: opts.onStop,
-    onSeek: opts.onSeek,
-    onCut: opts.onCut,
-    onAnimate: opts.onAnimate,
-    onChange: onEdit,
-  });
-
-  // After timeline UI mounts (it replaceChildren the host).
   const tlResize = document.createElement('div');
   tlResize.className = 'ed-tl-resize';
   tlResize.title = 'Drag to resize timeline';
@@ -311,7 +384,6 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     tlResize.setPointerCapture(e.pointerId);
 
     const onMove = (ev: PointerEvent) => {
-      // Drag up → taller timeline; drag down → shorter.
       applyTlHeight(startH + (startY - ev.clientY));
     };
     const onUp = (ev: PointerEvent) => {
@@ -333,12 +405,14 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
   });
   timelineHost.prepend(tlResize);
 
+  ensureBottomUi();
   refresh();
 
   return {
     refresh,
     updatePlayhead() {
-      timelineUi.updatePlayhead();
+      if (opts.getProject().editorMode === 'master') masterUi?.updatePlayhead();
+      else timelineUi?.updatePlayhead();
       refreshPreviewHud();
     },
     setChromeVisible(visible) {
@@ -353,7 +427,6 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       opts.viewer.setPostRender(null);
       viewGizmo.dispose();
       cameraPreview.dispose();
-      // Move app back and remove shell
       document.body.append(app);
       root.remove();
     },

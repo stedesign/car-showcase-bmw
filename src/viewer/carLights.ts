@@ -149,10 +149,16 @@ type SplitMesh = {
 
 export type CarLightsHandle = {
   params: CarLightsParams;
-  /** Collect glow materials from a freshly loaded model root. */
-  bind: (root: THREE.Object3D) => void;
+  /**
+   * Collect glow materials from a freshly loaded model root.
+   * @param worldParent scene (or equivalent) for ground pools — not modelRoot,
+   *   so hiding the car never parents the floor FX under a hidden group by mistake.
+   */
+  bind: (root: THREE.Object3D, worldParent?: THREE.Object3D) => void;
   /** Drop anchors before the current model meshes are disposed. */
   unbind: () => void;
+  /** Hide ground pools / beams with the car; floor mesh stays independent. */
+  setCarVisible: (visible: boolean) => void;
   applyParams: () => void;
   dispose: () => void;
 };
@@ -312,6 +318,7 @@ export function createCarLights(): CarLightsHandle {
 
   const glowGroup = new THREE.Group();
   glowGroup.name = 'CarLightGroundGlow';
+  let carVisible = true;
   const glowTexture = createGlowSpriteTexture();
   const beamTexture = createBeamTexture();
 
@@ -585,7 +592,12 @@ export function createCarLights(): CarLightsHandle {
     }
   };
 
-  const bind = (root: THREE.Object3D) => {
+  const setCarVisible = (visible: boolean) => {
+    carVisible = visible;
+    glowGroup.visible = visible;
+  };
+
+  const bind = (root: THREE.Object3D, worldParent?: THREE.Object3D) => {
     // Restore previous EXT_LIGHTS mats only when they are still live.
     for (const entry of edge) restoreEdge(entry);
     unbind();
@@ -669,8 +681,11 @@ export function createCarLights(): CarLightsHandle {
       addPool('red', c, 0xff2200, 1.5, 1.8);
     }
 
-    // Keep glow in world space under the car (root is already on the floor).
-    root.parent?.add(glowGroup);
+    // Parent to the scene (not modelRoot) so car hide never swallows floor FX /
+    // leave the concrete ground looking like it vanished with the vehicle.
+    const parent = worldParent ?? root.parent ?? root;
+    parent.add(glowGroup);
+    glowGroup.visible = carVisible;
 
     applyParams();
   };
@@ -756,6 +771,7 @@ export function createCarLights(): CarLightsHandle {
     params,
     bind,
     unbind,
+    setCarVisible,
     applyParams,
     dispose,
   };

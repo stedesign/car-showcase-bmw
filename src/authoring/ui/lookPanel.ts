@@ -1,4 +1,8 @@
 import { ENVIRONMENT_PRESETS, type Viewer } from '../../viewer/Viewer';
+import {
+  DEFAULT_DOT_GRID_PARAMS,
+  DOT_GRID_EFFECT_MODES,
+} from '../../viewer/dottedWrtScreen';
 
 function field(
   label: string,
@@ -43,6 +47,23 @@ function checkInput(value: boolean, onChange: (v: boolean) => void): HTMLInputEl
   input.checked = value;
   input.addEventListener('change', () => onChange(input.checked));
   return input;
+}
+
+function selectInput(
+  value: string,
+  options: Array<{ value: string; label: string }>,
+  onChange: (v: string) => void,
+): HTMLSelectElement {
+  const select = document.createElement('select');
+  for (const opt of options) {
+    const o = document.createElement('option');
+    o.value = opt.value;
+    o.textContent = opt.label;
+    select.append(o);
+  }
+  select.value = value;
+  select.addEventListener('change', () => onChange(select.value));
+  return select;
 }
 
 function details(title: string): { root: HTMLDetailsElement; body: HTMLElement } {
@@ -176,6 +197,101 @@ export function renderLookPanel(
   );
   host.append(soft.root);
 
+  const roof = details('Roof strobe');
+  const rs = viewer.roofStrobe.params;
+  const applyRs = () => viewer.roofStrobe.applyParams();
+  roof.body.append(
+    field('Enabled', checkInput(rs.enabled, note((v) => {
+      rs.enabled = v;
+      applyRs();
+    }))),
+    field(
+      'Intensity',
+      numInput(rs.intensity, 0, 30, 0.05, note((v) => {
+        rs.intensity = v;
+        applyRs();
+      })),
+    ),
+    field(
+      'Color',
+      colorInput(rs.color, note((v) => {
+        rs.color = v;
+        applyRs();
+      })),
+    ),
+    field(
+      'Flash duration (s)',
+      numInput(rs.flashDuration, 1, 10, 0.1, note((v) => {
+        rs.flashDuration = v;
+        applyRs();
+      })),
+    ),
+    field(
+      'Strobe Hz',
+      numInput(rs.strobeHz, 1, 16, 0.1, note((v) => {
+        rs.strobeHz = v;
+        applyRs();
+      })),
+    ),
+    field('Strobing', checkInput(rs.strobing, note((v) => {
+      rs.strobing = v;
+      applyRs();
+    }))),
+    field(
+      'Width',
+      numInput(rs.width, 0.3, 3, 0.01, note((v) => {
+        rs.width = v;
+        applyRs();
+      })),
+    ),
+    field(
+      'Length',
+      numInput(rs.length, 0.5, 8, 0.05, note((v) => {
+        rs.length = v;
+        applyRs();
+      })),
+    ),
+    field(
+      'Thickness',
+      numInput(rs.thickness, 0.04, 0.5, 0.01, note((v) => {
+        rs.thickness = v;
+        applyRs();
+      })),
+    ),
+    field(
+      'Height offset',
+      numInput(rs.yOffset, 0.1, 3, 0.01, note((v) => {
+        rs.yOffset = v;
+        applyRs();
+      })),
+    ),
+  );
+  const roofFlash = document.createElement('button');
+  roofFlash.type = 'button';
+  roofFlash.className = 'ed-btn';
+  roofFlash.textContent = 'Trigger strobe';
+  roofFlash.addEventListener('click', () => {
+    viewer.roofStrobe.triggerFlash(rs.flashDuration);
+    onEdit?.();
+  });
+  const roofStop = document.createElement('button');
+  roofStop.type = 'button';
+  roofStop.className = 'ed-btn';
+  roofStop.textContent = 'Stop';
+  roofStop.addEventListener('click', () => {
+    viewer.roofStrobe.stopFlash();
+    rs.strobing = false;
+    applyRs();
+    onEdit?.();
+  });
+  const roofBtnRow = document.createElement('div');
+  roofBtnRow.className = 'ed-field';
+  roofBtnRow.style.display = 'flex';
+  roofBtnRow.style.gap = '8px';
+  roofBtnRow.append(roofFlash, roofStop);
+  roof.body.append(roofBtnRow);
+  host.append(roof.root);
+
   const paint = details('Paint');
   paint.body.append(
     field(
@@ -245,6 +361,154 @@ export function renderLookPanel(
     }))),
   );
   host.append(logo.root);
+
+  const dotGrid = details('Dot Grid WRT');
+  const dg = viewer.dotGrid.params;
+  const applyDg = () => viewer.dotGrid.applyParams();
+  const modeOptions = DOT_GRID_EFFECT_MODES.map((m) => ({
+    value: String(m.id),
+    label: m.name,
+  }));
+  dotGrid.body.append(
+    field('Enabled', checkInput(dg.enabled, note((v) => {
+      dg.enabled = v;
+      applyDg();
+    }))),
+    field(
+      'Effect',
+      selectInput(String(Math.round(dg.effectMode)), modeOptions, note((v) => {
+        dg.effectMode = parseInt(v, 10);
+        applyDg();
+      })),
+    ),
+    field(
+      'Effect strength',
+      numInput(dg.effectStrength, 0, 2, 0.01, note((v) => {
+        dg.effectStrength = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Opacity',
+      numInput(dg.opacity, 0, 1, 0.01, note((v) => {
+        dg.opacity = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Reveal',
+      numInput(dg.reveal, 0, 1, 0.01, note((v) => {
+        dg.reveal = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Pulse',
+      numInput(dg.pulse, 0, 2, 0.01, note((v) => {
+        dg.pulse = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Wave / speed',
+      numInput(dg.wave, 0, 2, 0.01, note((v) => {
+        dg.wave = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Glow',
+      numInput(dg.glow, 0, 2, 0.01, note((v) => {
+        dg.glow = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Density',
+      numInput(dg.density, 24, 160, 1, note((v) => {
+        dg.density = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Distance',
+      numInput(dg.distance, 4, 24, 0.1, note((v) => {
+        dg.distance = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Height',
+      numInput(dg.height, 0.5, 8, 0.05, note((v) => {
+        dg.height = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Scale',
+      numInput(dg.scale, 0.3, 3, 0.05, note((v) => {
+        dg.scale = v;
+        applyDg();
+      })),
+    ),
+    field('Base', colorInput(dg.baseColor, note((v) => {
+      dg.baseColor = v;
+      applyDg();
+    }))),
+    field('Active', colorInput(dg.activeColor, note((v) => {
+      dg.activeColor = v;
+      applyDg();
+    }))),
+    field('Floor reflection', checkInput(dg.reflectionEnabled, note((v) => {
+      dg.reflectionEnabled = v;
+      applyDg();
+    }))),
+    field(
+      'Reflect opacity',
+      numInput(dg.reflectionOpacity, 0, 1, 0.01, note((v) => {
+        dg.reflectionOpacity = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Reflect length',
+      numInput(dg.reflectionLength, 0.5, 8, 0.05, note((v) => {
+        dg.reflectionLength = v;
+        applyDg();
+      })),
+    ),
+  );
+  const flashBtn = document.createElement('button');
+  flashBtn.type = 'button';
+  flashBtn.className = 'ed-btn';
+  flashBtn.textContent = 'Trigger flash';
+  flashBtn.addEventListener('click', () => viewer.dotGrid.triggerFlash(1.35));
+  const frameBtn = document.createElement('button');
+  frameBtn.type = 'button';
+  frameBtn.className = 'ed-btn';
+  frameBtn.textContent = 'Frame screen';
+  frameBtn.title = 'Move free camera to look at the dotted WRT wall';
+  frameBtn.addEventListener('click', () => viewer.frameDotGridScreen());
+  const resetBtn = document.createElement('button');
+  resetBtn.type = 'button';
+  resetBtn.className = 'ed-btn';
+  resetBtn.textContent = 'Reset defaults';
+  resetBtn.addEventListener('click', () => {
+    Object.assign(dg, structuredClone(DEFAULT_DOT_GRID_PARAMS));
+    applyDg();
+    onEdit?.();
+    renderLookPanel(viewer, host, onEdit);
+    // Frame after rebuild so camera uses the fresh placement.
+    requestAnimationFrame(() => viewer.frameDotGridScreen());
+  });
+  const btnRow = document.createElement('div');
+  btnRow.className = 'ed-field';
+  btnRow.style.display = 'flex';
+  btnRow.style.gap = '8px';
+  btnRow.style.flexWrap = 'wrap';
+  btnRow.append(frameBtn, flashBtn, resetBtn);
+  dotGrid.body.append(btnRow);
+  host.append(dotGrid.root);
 
   const carLights = details('Car lights');
   const cl = viewer.carLights.params;

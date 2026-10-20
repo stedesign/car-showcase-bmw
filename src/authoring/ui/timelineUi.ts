@@ -3,7 +3,7 @@ import type {
   CubicBezier,
   Keyframe,
   KeyframeValue,
-  Project,
+  Scene,
   Selection,
   TimelineTrack,
   Vec3,
@@ -98,7 +98,7 @@ function sampleCurve(
 }
 
 export type TimelineUiApi = {
-  getProject: () => Project;
+  getScene: () => Scene;
   getSelection: () => Selection;
   timeline: TimelineEngine;
   onPlay: () => void;
@@ -176,7 +176,7 @@ function holdSegments(track: TimelineTrack | null, duration: number): HoldSegmen
   return segs;
 }
 
-function buildRows(project: Project, tracks: TimelineTrack[]): Row[] {
+function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
   const byTarget = new Map(tracks.map((t) => [t.target, t]));
   const rows: Row[] = [];
   const used = new Set<string>();
@@ -244,6 +244,29 @@ function buildRows(project: Project, tracks: TimelineTrack[]): Row[] {
       used.add(t.target);
     } else if (parts[0] === 'carLights') {
       const g = ensureGroup('carLights', 'Car Lights');
+      g.items.push({ label: parts.slice(1).join('.') || t.target, track: t });
+      used.add(t.target);
+    } else if (parts[0] === 'roofStrobe') {
+      const g = ensureGroup('roofStrobe', 'Roof Strobe');
+      g.items.push({ label: parts.slice(1).join('.') || t.target, track: t });
+      used.add(t.target);
+    } else if (parts[0] === 'lighting') {
+      const g = ensureGroup('lighting', 'Lighting');
+      const prop = parts[1] ?? t.target;
+      const label =
+        prop === 'environmentIntensity'
+          ? 'Env intensity'
+          : prop === 'directIntensity'
+            ? 'Key intensity'
+            : prop === 'environment'
+              ? 'Environment'
+              : prop === 'exposure'
+                ? 'Exposure'
+                : prop;
+      g.items.push({ label, track: t });
+      used.add(t.target);
+    } else if (parts[0] === 'dotGrid') {
+      const g = ensureGroup('dotGrid', 'Dot Grid WRT');
       g.items.push({ label: parts.slice(1).join('.') || t.target, track: t });
       used.add(t.target);
     } else if (parts[0] === 'car') {
@@ -322,7 +345,7 @@ export function mountTimelineUi(
   durInput.addEventListener('change', () => {
     const v = parseFloat(durInput.value) || 8;
     api.timeline.setDuration(v);
-    api.getProject().duration = v;
+    api.getScene().duration = v;
     refresh();
     api.onChange();
   });
@@ -1127,7 +1150,7 @@ export function mountTimelineUi(
   const renderActiveRow = (
     row: HTMLElement,
     track: TimelineTrack | null,
-    project: Project,
+    project: Scene,
   ) => {
     if (!track) {
       const empty = document.createElement('div');
@@ -1381,7 +1404,7 @@ export function mountTimelineUi(
   };
 
   const refresh = () => {
-    const project = api.getProject();
+    const project = api.getScene();
     durInput.value = String(project.duration);
     labels.replaceChildren();
     tracksEl.replaceChildren();

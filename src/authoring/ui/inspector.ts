@@ -5,16 +5,23 @@ import { TEXT_PRESETS, type TextsHandle } from '../texts';
 import {
   CAR_ID,
   CAR_LIGHTS_ID,
+  DOT_GRID_ID,
   FREE_CAMERA_ID,
+  LIGHTING_ID,
+  ROOF_STROBE_ID,
   type Project,
+  type Scene,
   type Selection,
   type Vec3,
 } from '../project';
+import { ENVIRONMENT_PRESETS } from '../../viewer/Viewer';
+import { DOT_GRID_EFFECT_MODES } from '../../viewer/dottedWrtScreen';
 import { renderLookPanel } from './lookPanel';
 
 export type InspectorApi = {
   viewer: Viewer;
   getProject: () => Project;
+  getScene: () => Scene;
   getSelection: () => Selection;
   cameras: CamerasHandle;
   planes: PlanesHandle;
@@ -88,12 +95,18 @@ function vec3Inputs(v: Vec3, onChange: (v: Vec3) => void): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'ed-vec3';
   const mk = (key: keyof Vec3) => {
+    const cell = document.createElement('div');
+    cell.className = 'ed-vec3-axis';
+    const lab = document.createElement('span');
+    lab.className = 'ed-vec3-label';
+    lab.textContent = key.toUpperCase();
     const input = num(v[key], 0.01, (n) => {
       const next = { ...v, [key]: n };
       onChange(next);
     });
     input.title = key.toUpperCase();
-    return input;
+    cell.append(lab, input);
+    return cell;
   };
   wrap.append(mk('x'), mk('y'), mk('z'));
   return wrap;
@@ -127,7 +140,7 @@ function btn(label: string, onClick: () => void, cls = 'ed-btn'): HTMLButtonElem
 export function renderInspector(host: HTMLElement, api: InspectorApi): void {
   host.replaceChildren();
   const sel = api.getSelection();
-  const project = api.getProject();
+  const scene = api.getScene();
 
   const selectionHost = document.createElement('div');
   selectionHost.className = 'ed-section';
@@ -150,7 +163,7 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
         'Visible',
         check(api.viewer.carVisible, (v) => {
           api.viewer.setCarVisible(v);
-          project.carVisible = v;
+          scene.carVisible = v;
           api.onChange();
         }),
       ),
@@ -236,7 +249,7 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
         btn(lookingThrough ? 'Looking through ●' : 'Look through', () => {
           api.cameras.lookThrough(clip.id);
           api.cameras.setPlayCameraId(clip.id);
-          project.playCameraId = clip.id;
+          scene.playCameraId = clip.id;
           api.setStatus(`Looking through ${clip.name}`);
           api.onChange();
         }, lookingThrough ? 'ed-btn primary' : 'ed-btn'),
@@ -257,8 +270,8 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           'Delete',
           () => {
             if (api.cameras.remove(clip.id)) {
-              project.cameras = api.cameras.clips.map((c) => structuredClone(c));
-              project.playCameraId = api.cameras.playCameraId;
+              scene.cameras = api.cameras.clips.map((c) => structuredClone(c));
+              scene.playCameraId = api.cameras.playCameraId;
               api.onChange();
             }
           },
@@ -359,6 +372,262 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
     hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
     hint.textContent =
       'Scrub the timeline and press Animate to keyframe strengths / toggles.';
+    body.append(hint);
+  } else if (sel.kind === 'lighting' && sel.id === LIGHTING_ID) {
+    const L = api.viewer.state.lighting;
+    const envSelect = document.createElement('select');
+    for (const preset of ENVIRONMENT_PRESETS) {
+      const opt = document.createElement('option');
+      opt.value = preset;
+      opt.textContent = preset;
+      if (preset === L.environment) opt.selected = true;
+      envSelect.append(opt);
+    }
+    envSelect.addEventListener('change', () => {
+      L.environment = envSelect.value as typeof L.environment;
+      void api.viewer.applyEnvironment();
+      api.onLookEdit();
+    });
+    body.append(
+      field('Environment', envSelect),
+      field(
+        'Env intensity',
+        slider(L.environmentIntensity, 0, 3, 0.01, (v) => {
+          L.environmentIntensity = v;
+          api.viewer.applyEnvironmentTuning();
+          api.onLookEdit();
+        }),
+      ),
+      field(
+        'Exposure',
+        slider(L.exposure, 0, 2, 0.01, (v) => {
+          L.exposure = v;
+          api.viewer.applyLighting();
+          api.onLookEdit();
+        }),
+      ),
+      field(
+        'Key intensity',
+        slider(L.directIntensity, 0, 3, 0.01, (v) => {
+          L.directIntensity = v;
+          api.viewer.applyLighting();
+          api.onLookEdit();
+        }),
+      ),
+    );
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+    hint.textContent =
+      'Scrub the playhead, set values, then press Animate. Environment cuts between keys; intensities / exposure ease.';
+    body.append(hint);
+  } else if (sel.kind === 'roofStrobe' && sel.id === ROOF_STROBE_ID) {
+    const rs = api.viewer.roofStrobe.params;
+    const applyRs = () => {
+      api.viewer.roofStrobe.applyParams();
+      api.onLookEdit();
+    };
+    body.append(
+      field(
+        'Enabled',
+        check(rs.enabled, (v) => {
+          rs.enabled = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Intensity',
+        slider(rs.intensity, 0, 30, 0.05, (v) => {
+          rs.intensity = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Color',
+        colorInput(rs.color, (v) => {
+          rs.color = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Width',
+        slider(rs.width, 0.3, 3, 0.01, (v) => {
+          rs.width = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Length',
+        slider(rs.length, 0.5, 8, 0.05, (v) => {
+          rs.length = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Thickness',
+        slider(rs.thickness, 0.04, 0.5, 0.01, (v) => {
+          rs.thickness = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Height offset',
+        slider(rs.yOffset, 0.1, 3, 0.01, (v) => {
+          rs.yOffset = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Z offset',
+        slider(rs.zOffset, -2, 2, 0.01, (v) => {
+          rs.zOffset = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Flash duration (s)',
+        slider(rs.flashDuration, 1, 10, 0.1, (v) => {
+          rs.flashDuration = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Strobe Hz',
+        slider(rs.strobeHz, 1, 16, 0.1, (v) => {
+          rs.strobeHz = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Strobe duty',
+        slider(rs.strobeDuty, 0.1, 0.9, 0.01, (v) => {
+          rs.strobeDuty = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Flash decay',
+        slider(rs.flashDecay, 0.5, 14, 0.1, (v) => {
+          rs.flashDecay = v;
+          applyRs();
+        }),
+      ),
+      field(
+        'Strobing',
+        check(rs.strobing, (v) => {
+          rs.strobing = v;
+          applyRs();
+        }),
+      ),
+    );
+    const actions = document.createElement('div');
+    actions.className = 'ed-row';
+    actions.style.marginTop = '8px';
+    actions.append(
+      btn('Trigger strobe', () => {
+        api.viewer.roofStrobe.triggerFlash(rs.flashDuration);
+        api.onLookEdit();
+      }),
+      btn('Stop', () => {
+        api.viewer.roofStrobe.stopFlash();
+        rs.strobing = false;
+        applyRs();
+      }),
+    );
+    body.append(actions);
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+    hint.textContent =
+      'Max Intensity is much hotter now. Flash duration (1–10s) drives Trigger strobe. For timeline: Animate Strobing on, then off when done — or keyframe Intensity.';
+    body.append(hint);
+  } else if (sel.kind === 'dotGrid' && sel.id === DOT_GRID_ID) {
+    const dg = api.viewer.dotGrid.params;
+    const applyDg = () => {
+      api.viewer.dotGrid.applyParams();
+      api.onLookEdit();
+    };
+    const modeSelect = document.createElement('select');
+    for (const m of DOT_GRID_EFFECT_MODES) {
+      const o = document.createElement('option');
+      o.value = String(m.id);
+      o.textContent = m.name;
+      modeSelect.append(o);
+    }
+    modeSelect.value = String(Math.round(dg.effectMode));
+    modeSelect.addEventListener('change', () => {
+      dg.effectMode = parseInt(modeSelect.value, 10);
+      applyDg();
+    });
+    body.append(
+      field(
+        'Enabled',
+        check(dg.enabled, (v) => {
+          dg.enabled = v;
+          applyDg();
+        }),
+      ),
+      field('Effect', modeSelect),
+      field(
+        'Effect strength',
+        slider(dg.effectStrength, 0, 2, 0.01, (v) => {
+          dg.effectStrength = v;
+          applyDg();
+        }),
+      ),
+      field(
+        'Opacity',
+        slider(dg.opacity, 0, 1, 0.01, (v) => {
+          dg.opacity = v;
+          applyDg();
+        }),
+      ),
+      field(
+        'Reveal',
+        slider(dg.reveal, 0, 1, 0.01, (v) => {
+          dg.reveal = v;
+          applyDg();
+        }),
+      ),
+      field(
+        'Pulse',
+        slider(dg.pulse, 0, 2, 0.01, (v) => {
+          dg.pulse = v;
+          applyDg();
+        }),
+      ),
+      field(
+        'Wave',
+        slider(dg.wave, 0, 2, 0.01, (v) => {
+          dg.wave = v;
+          applyDg();
+        }),
+      ),
+      field(
+        'Glow',
+        slider(dg.glow, 0, 2, 0.01, (v) => {
+          dg.glow = v;
+          applyDg();
+        }),
+      ),
+      field(
+        'Floor reflection',
+        check(dg.reflectionEnabled, (v) => {
+          dg.reflectionEnabled = v;
+          applyDg();
+        }),
+      ),
+    );
+    const actions = document.createElement('div');
+    actions.className = 'ed-row';
+    actions.style.marginTop = '8px';
+    actions.append(
+      btn('Frame screen', () => api.viewer.frameDotGridScreen()),
+      btn('Trigger flash', () => api.viewer.dotGrid.triggerFlash(1.35)),
+    );
+    body.append(actions);
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+    hint.textContent =
+      'Scrub the playhead, set Effect / strength, then press Animate to keyframe. effectMode cuts cleanly between keys.';
     body.append(hint);
   } else if (sel.kind === 'light') {
     const entry = api.viewer.customLights.entries.find((e) => e.id === sel.id);
@@ -509,12 +778,18 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
                 const wrap = document.createElement('div');
                 wrap.className = 'ed-vec3';
                 const mk = (key: 'x' | 'y') => {
+                  const cell = document.createElement('div');
+                  cell.className = 'ed-vec3-axis';
+                  const lab = document.createElement('span');
+                  lab.className = 'ed-vec3-label';
+                  lab.textContent = key.toUpperCase();
                   const input = num(p.scale[key], 0.01, (n) => {
                     p.scale = { ...p.scale, [key]: n };
                     api.planes.apply(entry.id);
                   });
                   input.title = key.toUpperCase();
-                  return input;
+                  cell.append(lab, input);
+                  return cell;
                 };
                 wrap.append(mk('x'), mk('y'));
                 return wrap;
@@ -535,7 +810,7 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           'Delete',
           () => {
             api.planes.remove(entry.id);
-            project.planes = api.planes.serialize();
+            scene.planes = api.planes.serialize();
             api.onChange();
           },
           'ed-btn danger',
@@ -627,7 +902,7 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           'Delete',
           () => {
             api.texts.remove(entry.id);
-            project.texts = api.texts.serialize();
+            scene.texts = api.texts.serialize();
             api.onChange();
           },
           'ed-btn danger',
