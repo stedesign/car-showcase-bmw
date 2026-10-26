@@ -1,5 +1,6 @@
 import GUI from 'lil-gui';
 import { ENVIRONMENT_PRESETS, type Viewer } from './Viewer';
+import { logoMarkIndex } from './wrtLogo';
 import type { Recorder } from '../recorder/Recorder';
 import {
   applySettings,
@@ -252,6 +253,21 @@ export function createGui(
   roofFolder.add(roofActions, 'stop').name('Stop');
   roofFolder.open();
 
+  const airFolder = gui.addFolder('Airflow');
+  const air = viewer.airflow.params;
+  const applyAir = () => viewer.airflow.applyParams();
+  airFolder.add(air, 'enabled').name('on').onChange(applyAir);
+  airFolder.add(air, 'speed', 0, 3, 0.01).name('speed').onChange(applyAir);
+  airFolder
+    .add(air, 'brightness', 0, 8, 0.01)
+    .name('brightness')
+    .onChange(applyAir);
+  airFolder.add(air, 'opacity', 0, 1, 0.01).name('opacity').onChange(applyAir);
+  airFolder.add(air, 'width', 0.25, 4, 0.01).name('width').onChange(applyAir);
+  airFolder.addColor(air, 'flowColor').name('flow color').onChange(applyAir);
+  airFolder.addColor(air, 'accentColor').name('accent color').onChange(applyAir);
+  airFolder.open();
+
   const carLightsFolder = gui.addFolder('Car Lights');
   const carLights = viewer.carLights.params;
   carLightsFolder
@@ -489,6 +505,16 @@ export function createGui(
   const logoFolder = gui.addFolder('WRT Logo');
   const logo = viewer.logo.params;
   logoFolder.add(logo, 'enabled').onChange(() => viewer.logo.applyParams());
+  logoFolder
+    .add(logo, 'mark', { WRT: 0, 'We are a team': 1 })
+    .name('mark')
+    .onChange((value: number) => {
+      const mark = logoMarkIndex(Number(value));
+      viewer.logo.params.mark = mark;
+      viewer.dotGrid.params.mark = mark;
+      viewer.logo.applyParams();
+      viewer.dotGrid.applyParams();
+    });
   logoFolder
     .add(logo, 'intensity', 0, 10, 0.05)
     .onChange(() => viewer.logo.applyParams());

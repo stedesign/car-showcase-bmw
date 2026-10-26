@@ -1,7 +1,6 @@
 import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
 import { ensureExtrudeDepth, type PlanesHandle } from '../planes';
-import { TEXT_PRESETS, type TextsHandle } from '../texts';
 import {
   CAR_ID,
   CAR_LIGHTS_ID,
@@ -25,7 +24,6 @@ export type InspectorApi = {
   getSelection: () => Selection;
   cameras: CamerasHandle;
   planes: PlanesHandle;
-  texts: TextsHandle;
   onChange: () => void;
   /** History-only (no panel rebuild) — used by look sliders. */
   onLookEdit: () => void;
@@ -44,13 +42,6 @@ function field(label: string, control: HTMLElement): HTMLElement {
 function textInput(value: string, onChange: (v: string) => void): HTMLInputElement {
   const input = document.createElement('input');
   input.type = 'text';
-  input.value = value;
-  input.addEventListener('change', () => onChange(input.value));
-  return input;
-}
-
-function areaInput(value: string, onChange: (v: string) => void): HTMLTextAreaElement {
-  const input = document.createElement('textarea');
   input.value = value;
   input.addEventListener('change', () => onChange(input.value));
   return input;
@@ -155,7 +146,7 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
   if (!sel.kind || !sel.id) {
     const p = document.createElement('p');
     p.style.cssText = 'color:var(--ed-muted);font-size:12px;padding:4px 0 12px';
-    p.textContent = 'Select a camera, light, rectangle, or text.';
+    p.textContent = 'Select a camera, light, or rectangle.';
     body.append(p);
   } else if (sel.kind === 'car' && sel.id === CAR_ID) {
     body.append(
@@ -676,6 +667,15 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
       if (p.type === 'spot') {
         body.append(
           field(
+            'Rotation',
+            vec3Inputs({ x: p.rotX, y: p.rotY, z: p.rotZ }, (v) => {
+              p.rotX = v.x;
+              p.rotY = v.y;
+              p.rotZ = v.z;
+              api.viewer.customLights.apply(entry.id);
+            }),
+          ),
+          field(
             'Angle',
             num(p.angle, 1, (v) => {
               p.angle = v;
@@ -690,6 +690,11 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           btn('Rotate', () => api.viewer.customLights.setTransformMode('rotate')),
         );
         body.append(modes);
+        const tip = document.createElement('p');
+        tip.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+        tip.textContent =
+          'Aim the cone with Rotate, then press Animate to keyframe position + rotation.';
+        body.append(tip);
       }
       body.append(
         btn(
@@ -811,98 +816,6 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
           () => {
             api.planes.remove(entry.id);
             scene.planes = api.planes.serialize();
-            api.onChange();
-          },
-          'ed-btn danger',
-        ),
-      );
-      body.append(modes);
-    }
-  } else if (sel.kind === 'text') {
-    const entry = api.texts.entries.find((e) => e.id === sel.id);
-    if (entry) {
-      const p = entry.params;
-      body.append(
-        field(
-          'Name',
-          textInput(p.name, (v) => {
-            p.name = v;
-            api.onChange();
-          }),
-        ),
-        field(
-          'Content',
-          areaInput(p.content, (v) => {
-            p.content = v;
-            api.texts.apply(entry.id);
-          }),
-        ),
-        field(
-          'Opacity',
-          num(p.opacity, 0.01, (v) => {
-            p.opacity = v;
-            api.texts.apply(entry.id);
-          }),
-        ),
-        field(
-          'Scale',
-          num(p.scale, 0.05, (v) => {
-            p.scale = v;
-            api.texts.apply(entry.id);
-          }),
-        ),
-        field(
-          'Color',
-          colorInput(p.color, (v) => {
-            p.color = v;
-            api.texts.apply(entry.id);
-          }),
-        ),
-        field(
-          'Billboard',
-          check(p.billboard, (v) => {
-            p.billboard = v;
-            api.texts.apply(entry.id);
-          }),
-        ),
-        field(
-          'Position',
-          vec3Inputs(p.position, (v) => {
-            p.position = v;
-            api.texts.apply(entry.id);
-          }),
-        ),
-      );
-      const presets = document.createElement('select');
-      const ph = document.createElement('option');
-      ph.textContent = 'Insert preset…';
-      ph.value = '';
-      presets.append(ph);
-      for (const preset of TEXT_PRESETS) {
-        const opt = document.createElement('option');
-        opt.value = preset.content;
-        opt.textContent = preset.label;
-        presets.append(opt);
-      }
-      presets.addEventListener('change', () => {
-        if (!presets.value) return;
-        p.content = presets.value;
-        api.texts.apply(entry.id);
-        api.onChange();
-        presets.value = '';
-      });
-      body.append(field('Preset', presets));
-      const modes = document.createElement('div');
-      modes.className = 'ed-row';
-      modes.append(
-        btn('Move', () => api.texts.setTransformMode('translate')),
-        btn('Rotate', () => api.texts.setTransformMode('rotate')),
-        btn('Scale', () => api.texts.setTransformMode('scale')),
-        btn(
-          'Delete',
-          () => {
-            api.texts.remove(entry.id);
-            scene.texts = api.texts.serialize();
             api.onChange();
           },
           'ed-btn danger',

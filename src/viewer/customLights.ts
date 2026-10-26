@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import {
+  enableEditorOverlayPicking,
+  markEditorOverlay,
+} from './editorOverlays';
 
 export type CustomLightType = 'point' | 'spot';
 
@@ -127,11 +131,13 @@ export function createCustomLights(
 
   const transform = new TransformControls(camera, domElement);
   transform.setMode('translate');
-  transform.setSize(0.85);
+  transform.setSize(1.05);
   transform.enabled = false;
+  enableEditorOverlayPicking(transform);
   const transformHelper = transform.getHelper();
   transformHelper.visible = false;
   scene.add(transformHelper);
+  markEditorOverlay(transformHelper);
 
   let onTransformCommit: (() => void) | null = null;
 
@@ -256,6 +262,7 @@ export function createCustomLights(
 
     const helper = createHelper(light);
     helper.visible = showHelpers;
+    markEditorOverlay(helper);
 
     group.add(pivot);
     group.add(helper);

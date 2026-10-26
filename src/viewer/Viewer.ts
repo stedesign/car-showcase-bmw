@@ -22,6 +22,11 @@ import {
 import { createCarMaterials, type CarMaterialsHandle } from './carMaterials';
 import { createSoftboxes, type SoftboxesHandle } from './softboxes';
 import { createRoofStrobe, type RoofStrobeHandle } from './roofStrobe';
+import { createAirflow, type AirflowHandle } from './airflow';
+import {
+  EDITOR_OVERLAY_LAYER,
+  renderEditorOverlays,
+} from './editorOverlays';
 
 export type ViewerDisplay = {
   background: boolean;
@@ -140,6 +145,7 @@ export class Viewer {
   carMaterials!: CarMaterialsHandle;
   softboxes!: SoftboxesHandle;
   roofStrobe!: RoofStrobeHandle;
+  airflow!: AirflowHandle;
 
   private container: HTMLElement;
   private modelRoot = new THREE.Group();
@@ -159,6 +165,7 @@ export class Viewer {
   private disposed = false;
   private externalTick: ((dt: number, elapsed: number) => void) | null = null;
   private postRender: (() => void) | null = null;
+  private screenOverlay: ((renderer: THREE.WebGLRenderer) => void) | null = null;
   private extraShadowExcludes: THREE.Object3D[] = [];
 
   constructor(container: HTMLElement, onStatus?: (msg: string) => void) {
@@ -192,6 +199,8 @@ export class Viewer {
     );
     // Low frontal hero angle (refined after model load in frameObject)
     this.camera.position.set(0.15, 0.55, 6.8);
+    // Gizmos draw in a post-tone-map overlay pass (see renderEditorOverlays).
+    this.camera.layers.disable(EDITOR_OVERLAY_LAYER);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -259,6 +268,8 @@ export class Viewer {
     this.scene.add(this.softboxes.group);
     this.roofStrobe = createRoofStrobe();
     this.scene.add(this.roofStrobe.group);
+    this.airflow = createAirflow();
+    this.scene.add(this.airflow.group);
 
     window.addEventListener('resize', this.onResize);
   }
@@ -305,6 +316,7 @@ export class Viewer {
 
   set carVisible(visible: boolean) {
     this.modelRoot.visible = visible;
+    this.airflow?.setCarVisible(visible);
   }
 
   setCarVisible(visible: boolean) {
@@ -332,7 +344,15 @@ export class Viewer {
     this.postRender = fn;
   }
 
-  /** Objects excluded from ambient contact-shadow capture (planes, texts, gizmos). */
+  /**
+   * Draw into the WebGL canvas after the beauty pass and editor gizmos,
+   * before captureStream samples the frame.
+   */
+  setScreenOverlay(fn: ((renderer: THREE.WebGLRenderer) => void) | null) {
+    this.screenOverlay = fn;
+  }
+
+  /** Objects excluded from ambient contact-shadow capture (planes, gizmos). */
   setShadowExcludes(objects: THREE.Object3D[]) {
     this.extraShadowExcludes = objects.filter(Boolean);
   }
@@ -455,6 +475,8 @@ export class Viewer {
 
     this.softboxes?.setTarget(center, this.contentRadius);
     this.roofStrobe?.setFromCarBounds(box);
+    this.airflow?.setFromCarBounds(box);
+    this.airflow?.update(0, this.camera);
   }
 
   applyDisplay() {
@@ -643,6 +665,7 @@ export class Viewer {
       this.logo?.update(elapsed);
       this.dotGrid?.update(dt, elapsed);
       this.roofStrobe?.update(dt);
+      this.airflow?.update(dt, this.camera);
       this.effects.update(dt, elapsed);
       if (this.carVisible) {
         this.ambientShadows?.update(this.renderer, this.scene, [
@@ -654,6 +677,7 @@ export class Viewer {
           this.effects?.flashLight,
           this.softboxes?.group,
           this.roofStrobe?.group,
+          this.airflow?.group,
           this.gridHelper,
           ...this.extraShadowExcludes,
         ].filter(Boolean) as THREE.Object3D[]);
@@ -666,6 +690,9 @@ export class Viewer {
         this.effects?.setEmptyGarageFx(true);
       }
       this.effects.render();
+      // Camera / transform / light helpers — after ACES so dark looks stay readable.
+      renderEditorOverlays(this.renderer, this.scene, this.camera);
+      this.screenOverlay?.(this.renderer);
       this.postRender?.();
     };
     tick();
@@ -679,6 +706,7 @@ export class Viewer {
     this.carLights?.dispose();
     this.softboxes?.dispose();
     this.roofStrobe?.dispose();
+    this.airflow?.dispose();
     this.controls.dispose();
     this.renderer.dispose();
     for (const entry of this.hdrCache.values()) {

@@ -3,6 +3,13 @@ import {
   type SavedSettings,
 } from '../viewer/settings';
 import type { Viewer } from '../viewer/Viewer';
+import {
+  DEFAULT_FONT_ID,
+  isBuiltinFontId,
+  rememberFontSource,
+  storedFontSource,
+  type ProjectFont,
+} from './fonts';
 import { createStoryboardProject } from './storyboard';
 
 export const PROJECT_STORAGE_KEY = 'wrt-paddock-project';
@@ -30,22 +37,6 @@ export type PlaneClip = {
   color: string;
   /** When true, render as a box (scale.z = depth); otherwise a flat plane. */
   extrude: boolean;
-};
-
-export type TextAlign = 'left' | 'center' | 'right';
-
-export type TextClip = {
-  id: string;
-  name: string;
-  content: string;
-  position: Vec3;
-  rotation: Vec3;
-  scale: number;
-  opacity: number;
-  align: TextAlign;
-  color: string;
-  /** Face the active camera each frame. */
-  billboard: boolean;
 };
 
 export type EasingName = 'linear' | 'easeInOut';
@@ -97,7 +88,6 @@ export type Scene = {
   look: SavedSettings;
   cameras: CameraClip[];
   planes: PlaneClip[];
-  texts: TextClip[];
   timeline: { tracks: TimelineTrack[] };
 };
 
@@ -110,6 +100,85 @@ export type MasterClip = {
   out: number;
 };
 
+export type MasterTextEffect = 'maskedHeading' | 'blurReveal' | 'fade' | 'marquee';
+
+export type MasterTextAnchor = 'top' | 'center' | 'bottom';
+
+export type MasterTextAlign = 'left' | 'center' | 'right';
+
+/** Screen-space title on the master timeline. Not a scene object. */
+export type MasterTextClip = {
+  id: string;
+  name: string;
+  text: string;
+  /** Start on the master clock (seconds). */
+  start: number;
+  duration: number;
+  effect: MasterTextEffect;
+  anchor: MasterTextAnchor;
+  align: MasterTextAlign;
+  /** Font size as a fraction of the frame height. */
+  size: number;
+  /** Timeline row. Each title owns one lane so pills never overlap. */
+  lane: number;
+  /**
+   * Top-left of the text block as a fraction of the frame.
+   * Missing values keep the anchor / align placement.
+   */
+  x?: number;
+  y?: number;
+  /** Builtin font id, or an uploaded project font id. */
+  font: string;
+  /** CSS hex, `#rrggbb`. Masked headings tint the moving fill with this. */
+  color: string;
+  /** 0–1. Multiplies whatever the effect already fades. */
+  opacity: number;
+  /**
+   * Marquee travel in frame-widths per second.
+   * Positive slides left, negative slides right, 0 holds the line still.
+   */
+  speed: number;
+};
+
+export const TEXT_SIZE_MIN = 0.03;
+/** Slow crawl, about one frame width every seven seconds. */
+export const MARQUEE_SPEED_DEFAULT = 0.15;
+
+export function textSizeMax(effect: MasterTextEffect): number {
+  // The WRT background line is larger than the frame and cropped by it.
+  return effect === 'marquee' ? 1.2 : 0.2;
+}
+
+export function clampTextSize(effect: MasterTextEffect, size: number): number {
+  const n = Number.isFinite(size) && size > 0 ? size : 0.08;
+  return Math.min(textSizeMax(effect), Math.max(TEXT_SIZE_MIN, n));
+}
+
+export function clampTextOpacity(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(1, Math.max(0, n));
+}
+
+export function clampMarqueeSpeed(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(n)) return MARQUEE_SPEED_DEFAULT;
+  return Math.min(3, Math.max(-3, n));
+}
+
+export const DEFAULT_TEXT_COLOR = '#ffffff';
+/** Masked headings ship with the red duotone until the color is changed. */
+export const MASKED_TEXT_COLOR = '#ff0000';
+
+export function normalizeTextColor(value: unknown, fallback = DEFAULT_TEXT_COLOR): string {
+  if (typeof value !== 'string') return fallback;
+  let hex = value.trim().toLowerCase();
+  if (/^#[0-9a-f]{3}$/.test(hex)) {
+    hex = `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`;
+  }
+  return /^#[0-9a-f]{6}$/.test(hex) ? hex : fallback;
+}
+
 export type EditorMode = 'scene' | 'master';
 
 export type Project = {
@@ -119,8 +188,12 @@ export type Project = {
   activeSceneId: string;
   editorMode: EditorMode;
   scenes: Scene[];
-  master: { clips: MasterClip[] };
+  master: { clips: MasterClip[]; texts: MasterTextClip[] };
+  /** Team / custom faces available to master titles. */
+  fonts: ProjectFont[];
 };
+
+export type { ProjectFont };
 
 /** Flat v2 project shape (pre-scenes). */
 type LegacyProjectV2 = {
@@ -133,7 +206,6 @@ type LegacyProjectV2 = {
   look: SavedSettings;
   cameras: CameraClip[];
   planes?: PlaneClip[];
-  texts?: TextClip[];
   timeline: { tracks: TimelineTrack[] };
 };
 
@@ -147,7 +219,6 @@ export type SelectionKind =
   | 'lighting'
   | 'dotGrid'
   | 'plane'
-  | 'text'
   | null;
 
 /** Fixed selection id for the vehicle light rig (timeline: carLights.*). */
@@ -195,7 +266,6 @@ export function syncIdCounterFromScene(scene: Scene) {
   considerId(scene.id, max);
   scene.cameras.forEach((c) => considerId(c.id, max));
   scene.planes.forEach((p) => considerId(p.id, max));
-  scene.texts.forEach((t) => considerId(t.id, max));
   scene.timeline.tracks.forEach((t) => considerId(t.id, max));
   resetAuthoringIdCounter(max.n + 1);
 }
@@ -207,12 +277,17 @@ export function syncIdCounterFromProject(project: Project) {
     considerId(scene.id, max);
     scene.cameras.forEach((c) => considerId(c.id, max));
     scene.planes.forEach((p) => considerId(p.id, max));
-    scene.texts.forEach((t) => considerId(t.id, max));
     scene.timeline.tracks.forEach((t) => considerId(t.id, max));
   }
   for (const clip of project.master.clips) {
     considerId(clip.id, max);
     considerId(clip.sceneId, max);
+  }
+  for (const text of project.master.texts ?? []) {
+    considerId(text.id, max);
+  }
+  for (const font of project.fonts ?? []) {
+    considerId(font.id, max);
   }
   resetAuthoringIdCounter(max.n + 1);
 }
@@ -291,7 +366,6 @@ export function createBlankScene(name: string, look: SavedSettings, viewer?: Vie
     look: structuredClone(look),
     cameras,
     planes: [],
-    texts: [],
     timeline: { tracks: [] },
   };
 }
@@ -314,7 +388,8 @@ export function wrapSceneAsProject(
     activeSceneId: scene.id,
     editorMode: 'scene',
     scenes: [scene],
-    master: { clips: [clip] },
+    master: { clips: [clip], texts: [] },
+    fonts: [],
   };
 }
 
@@ -328,12 +403,9 @@ export function migrateLegacyV2(legacy: LegacyProjectV2): Project {
     look: structuredClone(legacy.look),
     cameras: structuredClone(legacy.cameras),
     planes: structuredClone(legacy.planes ?? []),
-    texts: structuredClone(legacy.texts ?? []),
     timeline: { tracks: structuredClone(legacy.timeline.tracks) },
   };
-  for (const plane of scene.planes) {
-    if (typeof plane.extrude !== 'boolean') plane.extrude = false;
-  }
+  normalizeScenePlanes(scene);
   return wrapSceneAsProject(scene, legacy.name, legacy.fps);
 }
 
@@ -349,7 +421,7 @@ export function duplicateScene(project: Project, sceneId: string): Scene | null 
   const copy = structuredClone(source);
   copy.id = nextAuthoringId('scene');
   copy.name = `${source.name} Copy`;
-  // Remap camera / plane / text / track ids so scenes stay independent.
+  // Remap camera / plane / track ids so scenes stay independent.
   const idMap = new Map<string, string>();
   for (const cam of copy.cameras) {
     const nid = nextAuthoringId('camera');
@@ -360,11 +432,6 @@ export function duplicateScene(project: Project, sceneId: string): Scene | null 
     const nid = nextAuthoringId('plane');
     idMap.set(plane.id, nid);
     plane.id = nid;
-  }
-  for (const text of copy.texts) {
-    const nid = nextAuthoringId('text');
-    idMap.set(text.id, nid);
-    text.id = nid;
   }
   for (const track of copy.timeline.tracks) {
     track.id = nextAuthoringId('track');
@@ -413,6 +480,21 @@ export function deleteScene(project: Project, sceneId: string): boolean {
   return true;
 }
 
+/** Replace every scene with one blank scene. Master titles stay; clips are rebuilt. */
+export function deleteAllScenes(project: Project, blank: Scene): Scene {
+  project.scenes = [blank];
+  project.activeSceneId = blank.id;
+  project.master.clips = [
+    {
+      id: nextAuthoringId('mclip'),
+      sceneId: blank.id,
+      in: 0,
+      out: blank.duration,
+    },
+  ];
+  return blank;
+}
+
 export function addMasterClip(
   project: Project,
   sceneId: string,
@@ -429,6 +511,174 @@ export function addMasterClip(
   };
   project.master.clips.push(clip);
   return clip;
+}
+
+const TEXT_EFFECTS: MasterTextEffect[] = ['maskedHeading', 'blurReveal', 'fade', 'marquee'];
+const TEXT_ANCHORS: MasterTextAnchor[] = ['top', 'center', 'bottom'];
+const TEXT_ALIGNS: MasterTextAlign[] = ['left', 'center', 'right'];
+
+function asEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : fallback;
+}
+
+/** Close gaps so lanes stay 0..n-1 with one title each. */
+export function compactMasterTextLanes(texts: MasterTextClip[]): void {
+  const lanes = [...new Set(texts.map((t) => t.lane))].sort((a, b) => a - b);
+  const map = new Map(lanes.map((lane, i) => [lane, i]));
+  for (const t of texts) t.lane = map.get(t.lane) ?? 0;
+}
+
+function settleMasterTextLanes(texts: MasterTextClip[]): void {
+  const seen = new Set<number>();
+  let next = texts.reduce((max, t) => Math.max(max, t.lane), -1) + 1;
+  for (const t of texts) {
+    if (!Number.isInteger(t.lane) || t.lane < 0 || seen.has(t.lane)) {
+      t.lane = next;
+      next += 1;
+    }
+    seen.add(t.lane);
+  }
+  compactMasterTextLanes(texts);
+}
+
+function fontIdOf(value: unknown, project: Project): string {
+  if (typeof value !== 'string' || !value) return DEFAULT_FONT_ID;
+  if (isBuiltinFontId(value)) return value;
+  if (project.fonts.some((font) => font.id === value)) return value;
+  return DEFAULT_FONT_ID;
+}
+
+/** Fill missing font files so older saves still load. */
+export function normalizeProjectFonts(project: Project): void {
+  const raw = (project as Project & { fonts?: unknown }).fonts;
+  const list = Array.isArray(raw) ? raw : [];
+  const fonts: ProjectFont[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const src = item as Partial<ProjectFont>;
+    if (typeof src.id !== 'string' || !src.id || seen.has(src.id)) continue;
+    if (typeof src.family !== 'string' || !src.family) continue;
+    const source =
+      typeof src.source === 'string' && src.source.startsWith('data:')
+        ? src.source
+        : storedFontSource(src.id);
+    if (!source.startsWith('data:')) continue;
+    seen.add(src.id);
+    const font: ProjectFont = {
+      id: src.id,
+      name: typeof src.name === 'string' && src.name.trim() ? src.name.trim() : 'Custom',
+      family: src.family,
+      source,
+    };
+    rememberFontSource(font.id, font.source);
+    fonts.push(font);
+  }
+  project.fonts = fonts;
+}
+
+/** Fill missing master text fields so older saves still load. */
+export function normalizeMasterTexts(project: Project): void {
+  const raw = (project.master as { texts?: unknown }).texts;
+  const list = Array.isArray(raw) ? raw : [];
+  const texts: MasterTextClip[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const src = item as Partial<MasterTextClip>;
+    const text = typeof src.text === 'string' && src.text.trim() ? src.text : 'Title';
+    const start = Number.isFinite(src.start) ? Math.max(0, src.start as number) : 0;
+    const duration = Number.isFinite(src.duration)
+      ? Math.max(0.25, src.duration as number)
+      : 4;
+    const laneRaw = src.lane;
+    const effect = asEnum(src.effect, TEXT_EFFECTS, 'maskedHeading');
+    const clip: MasterTextClip = {
+      id: typeof src.id === 'string' && src.id ? src.id : nextAuthoringId('mtext'),
+      name:
+        typeof src.name === 'string' && src.name
+          ? src.name
+          : text.split('\n')[0].slice(0, 40),
+      text,
+      start,
+      duration,
+      effect,
+      anchor: asEnum(src.anchor, TEXT_ANCHORS, 'center'),
+      align: asEnum(src.align, TEXT_ALIGNS, 'center'),
+      size: clampTextSize(effect, src.size as number),
+      lane: Number.isInteger(laneRaw) && (laneRaw as number) >= 0 ? (laneRaw as number) : -1,
+      font: fontIdOf(src.font, project),
+      color: normalizeTextColor(
+        src.color,
+        effect === 'maskedHeading' ? MASKED_TEXT_COLOR : DEFAULT_TEXT_COLOR,
+      ),
+      opacity: clampTextOpacity(src.opacity),
+      speed: clampMarqueeSpeed(src.speed),
+    };
+    if (Number.isFinite(src.x)) clip.x = src.x as number;
+    if (Number.isFinite(src.y)) clip.y = src.y as number;
+    texts.push(clip);
+  }
+  settleMasterTextLanes(texts);
+  project.master.texts = texts;
+}
+
+export function addMasterText(
+  project: Project,
+  partial?: Partial<MasterTextClip>,
+): MasterTextClip {
+  const total = masterDuration(project);
+  const start = Math.max(0, Math.min(partial?.start ?? 0, Math.max(0, total - 0.25)));
+  const room = Math.max(0.25, total - start);
+  const text = partial?.text?.trim() ? partial.text : 'Title';
+  const nextLane = project.master.texts.reduce((max, t) => Math.max(max, t.lane), -1) + 1;
+  const requested = partial?.lane;
+  const lane =
+    Number.isInteger(requested) &&
+    (requested as number) >= 0 &&
+    !project.master.texts.some((t) => t.lane === requested)
+      ? (requested as number)
+      : nextLane;
+  const effect = partial?.effect ?? 'maskedHeading';
+  const clip: MasterTextClip = {
+    id: partial?.id ?? nextAuthoringId('mtext'),
+    name: partial?.name?.trim() || text.split('\n')[0].slice(0, 40),
+    text,
+    start,
+    duration: Math.max(0.25, Math.min(partial?.duration ?? 4, room)),
+    effect,
+    anchor: partial?.anchor ?? 'center',
+    align: partial?.align ?? 'center',
+    size: clampTextSize(effect, partial?.size ?? 0.08),
+    lane,
+    font: fontIdOf(partial?.font, project),
+    color: normalizeTextColor(
+      partial?.color,
+      effect === 'maskedHeading' ? MASKED_TEXT_COLOR : DEFAULT_TEXT_COLOR,
+    ),
+    opacity: clampTextOpacity(partial?.opacity),
+    speed: clampMarqueeSpeed(partial?.speed),
+  };
+  if (Number.isFinite(partial?.x)) clip.x = partial?.x;
+  if (Number.isFinite(partial?.y)) clip.y = partial?.y;
+  project.master.texts.push(clip);
+  return clip;
+}
+
+/** Copy a master title onto the lane just below it, with the same timing and style. */
+export function duplicateMasterText(project: Project, textId: string): MasterTextClip | null {
+  const source = project.master.texts.find((t) => t.id === textId);
+  if (!source) return null;
+  const copy = structuredClone(source);
+  copy.id = nextAuthoringId('mtext');
+  const insertAt = source.lane + 1;
+  for (const text of project.master.texts) {
+    if (text.lane >= insertAt) text.lane += 1;
+  }
+  copy.lane = insertAt;
+  project.master.texts.push(copy);
+  return copy;
 }
 
 export function normalizeMasterClip(clip: MasterClip, scene: Scene): void {
@@ -455,6 +705,10 @@ function normalizeScenePlanes(scene: Scene) {
     if (typeof plane.extrude !== 'boolean') plane.extrude = false;
   }
   if (typeof scene.carVisible !== 'boolean') scene.carVisible = true;
+  delete (scene as Scene & { texts?: unknown }).texts;
+  scene.timeline.tracks = scene.timeline.tracks.filter(
+    (t) => !t.target.startsWith('text.'),
+  );
 }
 
 export function parseProject(raw: string): Project | null {
@@ -472,8 +726,10 @@ export function parseProject(raw: string): Project | null {
     const project = parsed as Project;
     if (!Array.isArray(project.scenes) || !project.scenes.length) return null;
     if (!project.master || !Array.isArray(project.master.clips)) {
-      project.master = { clips: [] };
+      project.master = { clips: [], texts: [] };
     }
+    normalizeProjectFonts(project);
+    normalizeMasterTexts(project);
     if (project.editorMode !== 'scene' && project.editorMode !== 'master') {
       project.editorMode = 'scene';
     }
@@ -500,8 +756,13 @@ export function parseProject(raw: string): Project | null {
   }
 }
 
-export function saveProjectToStorage(project: Project): void {
-  localStorage.setItem(PROJECT_STORAGE_KEY, serializeProject(project));
+export function saveProjectToStorage(project: Project): boolean {
+  try {
+    localStorage.setItem(PROJECT_STORAGE_KEY, serializeProject(project));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function loadProjectFromStorage(): Project | null {

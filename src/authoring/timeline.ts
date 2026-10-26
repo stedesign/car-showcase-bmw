@@ -40,6 +40,8 @@ export type TimelineEngine = {
   /** Move a keyframe in time (snaps, merges on collision). */
   moveKeyframe: (trackId: string, fromT: number, toT: number) => void;
   getTracks: () => TimelineTrack[];
+  /** Drop every keyframe track on the bound scene. */
+  clearTracks: () => void;
 };
 
 function ease(
@@ -112,9 +114,9 @@ function interpolate(
   const va = a.value;
   const vb = b.value;
 
-  // Discrete effect modes should cut, not blend through neighbors.
+  // Discrete choices should cut, not blend through neighbors.
   if (
-    target?.endsWith('.effectMode') &&
+    (target?.endsWith('.effectMode') || target?.endsWith('.mark')) &&
     typeof va === 'number' &&
     typeof vb === 'number'
   ) {
@@ -301,6 +303,10 @@ export function createTimelineEngine(initialDuration = 8): TimelineEngine {
     },
     getTracks() {
       return tracks();
+    },
+    clearTracks() {
+      if (!scene) return;
+      scene.timeline.tracks.length = 0;
     },
   };
 }

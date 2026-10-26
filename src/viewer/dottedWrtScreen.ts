@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { rasterizeLogo, type LogoRaster } from './logoImage';
+import { logoMarkIndex } from './wrtLogo';
 
 export type DotGridPreset = 'idle' | 'pulse' | 'shockwave';
 
@@ -54,6 +56,8 @@ export type DotGridParams = {
   reflectionFade: number;
   /** How far the floor wash stretches toward the camera (world units). */
   reflectionLength: number;
+  /** Which logo mask is painted. 0 = WRT, 1 = WE ARE A TEAM. Kept in sync with `logo.mark`. */
+  mark: number;
 };
 
 export const DEFAULT_DOT_GRID_PARAMS: DotGridParams = {
@@ -83,6 +87,7 @@ export const DEFAULT_DOT_GRID_PARAMS: DotGridParams = {
   reflectionOpacity: 0.55,
   reflectionFade: 0.78,
   reflectionLength: 3.4,
+  mark: 0,
 };
 
 function hash21(x: number, y: number, t: number): number {
@@ -139,7 +144,10 @@ function createFloorFadeAlphaMap(fade: number): THREE.CanvasTexture {
   return tex;
 }
 
-/** Precompute logo mask at cell centers for fast per-frame paints. */
+/**
+ * Precompute logo mask at cell centers for fast per-frame paints.
+ * `contain` is how much of the limiting screen axis the mark may use (1 = edge to edge).
+ */
 function buildMaskGrid(
   logoData: Uint8ClampedArray,
   logoW: number,
@@ -148,7 +156,9 @@ function buildMaskGrid(
   cellsY: number,
   planeAspect: number,
   logoAspect: number,
+  contain = 1,
 ): Float32Array {
+  const inset = Math.min(1, Math.max(0.05, contain));
   const mask = new Float32Array(cellsX * cellsY);
   for (let y = 0; y < cellsY; y++) {
     for (let x = 0; x < cellsX; x++) {
@@ -157,9 +167,11 @@ function buildMaskGrid(
       let lu = u;
       let lv = v;
       if (planeAspect > logoAspect) {
-        lu = (u - 0.5) * (planeAspect / logoAspect) + 0.5;
+        lu = (u - 0.5) * (planeAspect / logoAspect) / inset + 0.5;
+        lv = (v - 0.5) / inset + 0.5;
       } else {
-        lv = (v - 0.5) * (logoAspect / planeAspect) + 0.5;
+        lu = (u - 0.5) / inset + 0.5;
+        lv = (v - 0.5) * (logoAspect / planeAspect) / inset + 0.5;
       }
       if (lu < 0 || lu > 1 || lv < 0 || lv > 1) {
         mask[y * cellsX + x] = 0;
@@ -177,26 +189,23 @@ function buildMaskGrid(
 
 export async function createDottedWrtScreen(
   textureUrl = '/brand/wrt-logo.png',
+  altTextureUrl = '/brand/we-are-a-team.svg',
 ): Promise<DottedWrtScreenHandle> {
   const params: DotGridParams = { ...DEFAULT_DOT_GRID_PARAMS };
   const group = new THREE.Group();
   group.name = 'DottedWrtScreen';
 
-  const logoImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const img = new Image();
-    img.decoding = 'async';
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`Failed to load ${textureUrl}`));
-    img.src = textureUrl;
-  });
-
-  const logoAspect = logoImg.width / Math.max(1, logoImg.height);
-  const logoCanvas = document.createElement('canvas');
-  logoCanvas.width = logoImg.width;
-  logoCanvas.height = logoImg.height;
-  const logoCtx = logoCanvas.getContext('2d', { willReadFrequently: true })!;
-  logoCtx.drawImage(logoImg, 0, 0);
-  const logoData = logoCtx.getImageData(0, 0, logoImg.width, logoImg.height).data;
+  // Outlined letters are ~2px on a 394-wide SVG. Cell centers are ~9px apart
+  // on this wall, so the mask raster uses a heavier stroke or the outlines vanish.
+  // The stacked lockup is much taller than the WRT wordmark; keep it inside the wall.
+  const TEAM_DOT_CONTAIN = 0.72;
+  const sources: Array<{ raster: LogoRaster; contain: number }> = [
+    { raster: await rasterizeLogo(textureUrl, { maxEdge: 1024 }), contain: 1 },
+    {
+      raster: await rasterizeLogo(altTextureUrl, { maxEdge: 1600, minStrokeWidth: 9 }),
+      contain: TEAM_DOT_CONTAIN,
+    },
+  ];
 
   const paint = document.createElement('canvas');
   const paintW = 1280;
@@ -288,7 +297,7 @@ export async function createDottedWrtScreen(
   let lastFade = params.reflectionFade;
   let cellsX = 0;
   let cellsY = 0;
-  let maskGrid: Float32Array = new Float32Array(0);
+  let maskGrids: Float32Array[] = [];
   let maskDirty = true;
   let elapsed = 0;
 
@@ -296,17 +305,22 @@ export async function createDottedWrtScreen(
     const aspect = params.width / Math.max(0.001, params.heightWorld);
     cellsX = Math.max(8, Math.round(params.density));
     cellsY = Math.max(8, Math.round(params.density / aspect));
-    maskGrid = buildMaskGrid(
-      logoData,
-      logoImg.width,
-      logoImg.height,
-      cellsX,
-      cellsY,
-      aspect,
-      logoAspect,
+    maskGrids = sources.map((src) =>
+      buildMaskGrid(
+        src.raster.data,
+        src.raster.width,
+        src.raster.height,
+        cellsX,
+        cellsY,
+        aspect,
+        src.raster.aspect,
+        src.contain,
+      ),
     );
     maskDirty = false;
   };
+
+  const activeMask = () => maskGrids[logoMarkIndex(params.mark)] ?? maskGrids[0];
 
   const syncFloorReflection = () => {
     const length = Math.max(0.2, params.reflectionLength);
@@ -451,6 +465,7 @@ export async function createDottedWrtScreen(
     const pulseWave = 0.5 + 0.5 * Math.sin(elapsed * params.pulseHz * Math.PI * 2);
     const wavePhase = elapsed * params.waveSpeed * Math.PI * 2;
     const reveal = effectiveReveal();
+    const maskGrid = activeMask();
 
     // Pass 1 — soft halos under logo / hot dots (feeds bloom + additive layer).
     if (glowAmt > 0.01) {

@@ -1,4 +1,5 @@
 import { ENVIRONMENT_PRESETS, type Viewer } from '../../viewer/Viewer';
+import { logoMarkIndex } from '../../viewer/wrtLogo';
 import {
   DEFAULT_DOT_GRID_PARAMS,
   DOT_GRID_EFFECT_MODES,
@@ -292,6 +293,60 @@ export function renderLookPanel(
   roof.body.append(roofBtnRow);
   host.append(roof.root);
 
+  const air = details('Airflow');
+  air.root.open = true;
+  const af = viewer.airflow.params;
+  const applyAir = () => viewer.airflow.applyParams();
+  air.body.append(
+    field('On', checkInput(af.enabled, note((v) => {
+      af.enabled = v;
+      applyAir();
+    }))),
+    field(
+      'Speed',
+      numInput(af.speed, 0, 3, 0.01, note((v) => {
+        af.speed = v;
+        applyAir();
+      })),
+    ),
+    field(
+      'Brightness',
+      numInput(af.brightness, 0, 8, 0.01, note((v) => {
+        af.brightness = v;
+        applyAir();
+      })),
+    ),
+    field(
+      'Opacity',
+      numInput(af.opacity, 0, 1, 0.01, note((v) => {
+        af.opacity = v;
+        applyAir();
+      })),
+    ),
+    field(
+      'Width',
+      numInput(af.width, 0.25, 4, 0.01, note((v) => {
+        af.width = v;
+        applyAir();
+      })),
+    ),
+    field(
+      'Flow color',
+      colorInput(af.flowColor, note((v) => {
+        af.flowColor = v;
+        applyAir();
+      })),
+    ),
+    field(
+      'Accent color',
+      colorInput(af.accentColor, note((v) => {
+        af.accentColor = v;
+        applyAir();
+      })),
+    ),
+  );
+  host.append(air.root);
+
   const paint = details('Paint');
   paint.body.append(
     field(
@@ -348,6 +403,23 @@ export function renderLookPanel(
       viewer.logo.params.enabled = v;
       viewer.logo.applyParams();
     }))),
+    field(
+      'Mark',
+      selectInput(
+        String(logoMarkIndex(viewer.logo.params.mark)),
+        [
+          { value: '0', label: 'WRT' },
+          { value: '1', label: 'We are a team' },
+        ],
+        note((v) => {
+          const mark = logoMarkIndex(Number(v));
+          viewer.logo.params.mark = mark;
+          viewer.dotGrid.params.mark = mark;
+          viewer.logo.applyParams();
+          viewer.dotGrid.applyParams();
+        }),
+      ),
+    ),
     field(
       'Intensity',
       numInput(viewer.logo.params.intensity, 0, 8, 0.05, note((v) => {

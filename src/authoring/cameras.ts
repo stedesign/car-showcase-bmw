@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { Reflector } from 'three/examples/jsm/objects/Reflector.js';
+import {
+  enableEditorOverlayPicking,
+  markEditorOverlay,
+} from '../viewer/editorOverlays';
 import type { CameraClip, CameraPoseValue, Vec3 } from './project';
 import { cloneVec3, nextAuthoringId, vec3 } from './project';
 import { poseFromCameraClip } from './timeline';
@@ -22,6 +26,8 @@ export type CamerasHandle = {
   setClips: (clips: CameraClip[], playCameraId?: string) => void;
   add: (partial?: Partial<CameraClip>) => CameraClip;
   remove: (id: string) => boolean;
+  /** Remove every dedicated camera and return to the free camera. */
+  clear: () => void;
   get: (id: string) => CameraClip | undefined;
   select: (id: string | null) => void;
   captureFromView: (id: string) => void;
@@ -29,6 +35,14 @@ export type CamerasHandle = {
   lookThrough: (id: string) => void;
   /** Return viewport to free / orbit camera. */
   enterFree: () => void;
+  /**
+   * Master view: look through a scene camera and keep orbit from editing it.
+   * Does not overwrite the free-camera bookmark.
+   */
+  holdShot: (id: string) => void;
+  /** Leave holdShot and restore the free camera. */
+  releaseShot: () => void;
+  readonly holdingShot: boolean;
   /** Bookmark current free view (call before leaving free mode). */
   saveFreeView: () => void;
   applyClip: (id: string) => void;
@@ -85,17 +99,18 @@ type Entry = {
   params: CameraClip;
   body: THREE.Object3D;
   frustum: THREE.LineSegments;
+  icon: THREE.Group;
   label: THREE.Sprite;
   aim: THREE.Mesh;
   line: THREE.Line;
 };
 
 function camColor(selected: boolean) {
-  return selected ? 0x5b8def : 0x3dd6c6;
+  return selected ? 0x7aa8ff : 0x5cf0e0;
 }
 
 function aimColor(selected: boolean) {
-  return selected ? 0x5b8def : 0xf0c14b;
+  return selected ? 0x7aa8ff : 0xffd666;
 }
 
 function unlit(color: number, opacity = 1): THREE.MeshBasicMaterial {
@@ -106,6 +121,7 @@ function unlit(color: number, opacity = 1): THREE.MeshBasicMaterial {
     depthTest: false,
     depthWrite: false,
     toneMapped: false,
+    fog: false,
   });
 }
 
@@ -115,9 +131,41 @@ function unlitLine(color: number): THREE.LineBasicMaterial {
     depthTest: false,
     depthWrite: false,
     toneMapped: false,
+    fog: false,
     transparent: true,
-    opacity: 0.95,
+    opacity: 1,
   });
+}
+
+/** Compact camera body + lens so shots stay findable in dark studios. */
+function buildCameraIcon(color: number): THREE.Group {
+  const icon = new THREE.Group();
+  icon.name = 'CameraIcon';
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.28, 0.18, 0.22),
+    unlit(color, 0.92),
+  );
+  body.position.set(0, 0, 0.02);
+  body.renderOrder = 22;
+
+  const lens = new THREE.Mesh(
+    new THREE.ConeGeometry(0.1, 0.16, 12, 1, true),
+    unlit(color, 0.85),
+  );
+  lens.rotation.x = Math.PI / 2;
+  lens.position.set(0, 0, -0.16);
+  lens.renderOrder = 22;
+
+  const viewfinder = new THREE.Mesh(
+    new THREE.BoxGeometry(0.1, 0.08, 0.08),
+    unlit(0xffffff, 0.75),
+  );
+  viewfinder.position.set(0, 0.12, 0.02);
+  viewfinder.renderOrder = 22;
+
+  icon.add(body, lens, viewfinder);
+  return icon;
 }
 
 /** Wire frustum + up-triangle in local camera space (looks down -Z). */
@@ -178,10 +226,11 @@ function makeLabelSprite(text: string): THREE.Sprite {
     depthTest: false,
     depthWrite: false,
     toneMapped: false,
+    fog: false,
     transparent: true,
   });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(1.1, 0.28, 1);
+  sprite.scale.set(1.35, 0.34, 1);
   sprite.center.set(0.5, 0);
   sprite.renderOrder = 30;
   return sprite;
@@ -244,6 +293,8 @@ export function createCamerasHandle(
   let selectedId: string | null = null;
   let viewMode: CameraViewMode = 'free';
   let throughCameraId: string | null = null;
+  /** Master timeline is showing a scene shot; don't fall back to the free camera. */
+  let shotHold = false;
   let playbackLocked = false;
   let helpersVisible = true;
   let helpersVisibleBeforePlayback = true;
@@ -271,11 +322,13 @@ export function createCamerasHandle(
 
   const transform = new TransformControls(viewportCamera, domElement);
   transform.setMode('translate');
-  transform.setSize(0.75);
+  transform.setSize(1.05);
   transform.enabled = false;
+  enableEditorOverlayPicking(transform);
   const transformHelper = transform.getHelper();
   transformHelper.visible = false;
   scene.add(transformHelper);
+  markEditorOverlay(transformHelper);
 
   let onTransformCommit: (() => void) | null = null;
 
@@ -308,8 +361,17 @@ export function createCamerasHandle(
     fov: viewportCamera.fov,
   });
 
+  const tintIcon = (icon: THREE.Group, color: number) => {
+    icon.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      if (obj.name === 'viewfinder') return;
+      const mat = obj.material as THREE.MeshBasicMaterial;
+      if (mat?.color) mat.color.setHex(color);
+    });
+  };
+
   const syncHelperFromParams = (entry: Entry) => {
-    const { params, body, aim, line, frustum, label } = entry;
+    const { params, body, aim, line, frustum, icon, label } = entry;
     aimBodyLikeCamera(body, params.position, params.target);
     aim.position.set(params.target.x, params.target.y, params.target.z);
 
@@ -326,16 +388,18 @@ export function createCamerasHandle(
     const color = camColor(selected);
     (frustum.material as THREE.LineBasicMaterial).color.setHex(color);
     (line.material as THREE.LineBasicMaterial).color.setHex(
-      selected ? 0x5b8def : 0xa8b0c2,
+      selected ? 0x7aa8ff : 0xd0d6e4,
     );
     (aim.material as THREE.MeshBasicMaterial).color.setHex(aimColor(selected));
+    tintIcon(icon, color);
     redrawLabel(label, params.name);
 
     // Visible in free view (and while looking through any other camera).
     // Hidden only for the camera you're currently looking through / during record.
     const throughSelf =
       viewMode === 'through' && throughCameraId === entry.id;
-    const visibleInViewport = helpersVisible && !playbackLocked && !throughSelf;
+    const visibleInViewport =
+      helpersVisible && !playbackLocked && !shotHold && !throughSelf;
     body.visible = visibleInViewport;
     aim.visible = visibleInViewport;
     line.visible = visibleInViewport;
@@ -377,7 +441,7 @@ export function createCamerasHandle(
 
   const attachTransform = () => {
     const entry = selectedId ? findEntry(selectedId) : null;
-    if (!entry || playbackLocked || !helpersVisible) {
+    if (!entry || playbackLocked || shotHold || !helpersVisible) {
       transform.detach();
       transform.enabled = false;
       transformHelper.visible = false;
@@ -391,7 +455,7 @@ export function createCamerasHandle(
 
   /** Orbit / pan / zoom while looking through writes back into the shot (Blender lock-to-view). */
   const onControlsChange = () => {
-    if (playbackLocked || transform.dragging) return;
+    if (playbackLocked || shotHold || transform.dragging) return;
     if (viewMode !== 'through' || !throughCameraId) return;
     const entry = findEntry(throughCameraId);
     if (!entry) return;
@@ -413,6 +477,11 @@ export function createCamerasHandle(
     (entry.aim.material as THREE.Material).dispose();
     entry.frustum.geometry.dispose();
     (entry.frustum.material as THREE.Material).dispose();
+    entry.icon.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      obj.geometry.dispose();
+      (obj.material as THREE.Material).dispose();
+    });
     const labelMat = entry.label.material as THREE.SpriteMaterial;
     labelMat.map?.dispose();
     labelMat.dispose();
@@ -428,13 +497,17 @@ export function createCamerasHandle(
     );
     frustum.renderOrder = 21;
 
-    const label = makeLabelSprite(params.name);
-    label.position.set(0, 0.35, 0.1);
+    const icon = buildCameraIcon(camColor(false));
+    const viewfinder = icon.children[2];
+    if (viewfinder) viewfinder.name = 'viewfinder';
 
-    body.add(frustum, label);
+    const label = makeLabelSprite(params.name);
+    label.position.set(0, 0.42, 0.1);
+
+    body.add(icon, frustum, label);
 
     const aim = new THREE.Mesh(
-      new THREE.SphereGeometry(0.1, 16, 12),
+      new THREE.SphereGeometry(0.14, 16, 12),
       unlit(aimColor(false)),
     );
     aim.renderOrder = 23;
@@ -445,18 +518,22 @@ export function createCamerasHandle(
       'position',
       new THREE.Float32BufferAttribute(new Float32Array(6), 3),
     );
-    const line = new THREE.Line(lineGeo, unlitLine(0xa8b0c2));
+    const line = new THREE.Line(lineGeo, unlitLine(0xd0d6e4));
     line.renderOrder = 20;
 
     group.add(body);
     group.add(aim);
     group.add(line);
+    markEditorOverlay(body);
+    markEditorOverlay(aim);
+    markEditorOverlay(line);
 
     const entry: Entry = {
       id: params.id,
       params,
       body,
       frustum,
+      icon,
       label,
       aim,
       line,
@@ -498,6 +575,7 @@ export function createCamerasHandle(
 
   const enterFree = () => {
     cancelAxisSnap();
+    shotHold = false;
     viewMode = 'free';
     throughCameraId = null;
     applyPoseToViewport(freePose);
@@ -527,8 +605,32 @@ export function createCamerasHandle(
     attachTransform();
   };
 
+  const holdShot = (id: string) => {
+    const clip = find(id);
+    if (!clip) return;
+    cancelAxisSnap();
+    const changed = !shotHold || viewMode !== 'through' || throughCameraId !== id;
+    shotHold = true;
+    viewMode = 'through';
+    throughCameraId = id;
+    controls.enabled = false;
+    controls.autoRotate = false;
+    if (changed) {
+      transform.detach();
+      transform.enabled = false;
+      transformHelper.visible = false;
+      for (const e of entries) syncHelperFromParams(e);
+    }
+    applyClip(id);
+  };
+
+  const releaseShot = () => {
+    shotHold = false;
+    enterFree();
+  };
+
   const snapToAxis = (axis: CameraAxis) => {
-    if (playbackLocked) return;
+    if (playbackLocked || shotHold) return;
 
     // Axis snaps always operate the free / general camera, keeping the
     // current framing (don't jump back to the free-view bookmark).
@@ -639,20 +741,28 @@ export function createCamerasHandle(
     },
     remove(id) {
       const index = clips.findIndex((c) => c.id === id);
-      if (index < 0 || clips.length <= 1) return false;
+      if (index < 0) return false;
       clips.splice(index, 1);
       const entryIndex = entries.findIndex((e) => e.id === id);
       if (entryIndex >= 0) {
         disposeEntry(entries[entryIndex]);
         entries.splice(entryIndex, 1);
       }
-      if (activePlayId === id) activePlayId = clips[0].id;
+      if (activePlayId === id) activePlayId = clips[0]?.id ?? '';
       if (throughCameraId === id) enterFree();
       if (selectedId === id) {
         selectedId = null;
         attachTransform();
       }
       return true;
+    },
+    clear() {
+      for (const entry of entries) disposeEntry(entry);
+      entries.length = 0;
+      clips = [];
+      activePlayId = '';
+      selectedId = null;
+      enterFree();
     },
     get: find,
     select(id) {
@@ -675,6 +785,11 @@ export function createCamerasHandle(
     },
     lookThrough,
     enterFree,
+    holdShot,
+    releaseShot,
+    get holdingShot() {
+      return shotHold;
+    },
     saveFreeView,
     applyClip,
     applyPose(pose) {
@@ -702,8 +817,13 @@ export function createCamerasHandle(
         helpersVisible = false;
       } else if (!locked && playbackLocked) {
         helpersVisible = helpersVisibleBeforePlayback;
-        enterFree();
-        controls.enabled = savedOrbitEnabled;
+        if (shotHold) {
+          controls.enabled = false;
+          controls.autoRotate = false;
+        } else {
+          enterFree();
+          controls.enabled = savedOrbitEnabled;
+        }
       }
       playbackLocked = locked;
       for (const e of entries) syncHelperFromParams(e);

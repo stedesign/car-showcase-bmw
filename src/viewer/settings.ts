@@ -12,6 +12,7 @@ import {
   DEFAULT_ROOF_STROBE_PARAMS,
   type RoofStrobeParams,
 } from './roofStrobe';
+import { DEFAULT_AIRFLOW_PARAMS, type AirflowParams } from './airflow';
 import {
   DEFAULT_CAR_LIGHTS_PARAMS,
   type CarLightsParams,
@@ -20,7 +21,7 @@ import {
   DEFAULT_AMBIENT_SHADOW_PARAMS,
   type AmbientShadowParams,
 } from './ambientShadows';
-import { DEFAULT_LOGO_PARAMS, type WrtLogoParams } from './wrtLogo';
+import { DEFAULT_LOGO_PARAMS, logoMarkIndex, type WrtLogoParams } from './wrtLogo';
 import {
   DEFAULT_DOT_GRID_PARAMS,
   type DotGridParams,
@@ -39,6 +40,7 @@ export type SavedSettings = {
   paint: CarMaterialsParams;
   softboxes: SoftboxParams;
   roofStrobe: RoofStrobeParams;
+  airflow: AirflowParams;
   carLights: CarLightsParams;
   ambient: AmbientShadowParams;
   logo: WrtLogoParams;
@@ -65,6 +67,7 @@ export function captureSettings(viewer: Viewer): SavedSettings {
       flashIntensity: 0,
       strobing: false,
     },
+    airflow: structuredClone(viewer.airflow.params),
     carLights: structuredClone(viewer.carLights.params),
     ambient: structuredClone(viewer.ambientShadows.params),
     logo: structuredClone(viewer.logo.params),
@@ -87,6 +90,7 @@ export function defaultSettings(): SavedSettings {
     paint: structuredClone(DEFAULT_CAR_MATERIALS_PARAMS),
     softboxes: structuredClone(DEFAULT_SOFTBOX_PARAMS),
     roofStrobe: structuredClone(DEFAULT_ROOF_STROBE_PARAMS),
+    airflow: structuredClone(DEFAULT_AIRFLOW_PARAMS),
     carLights: structuredClone(DEFAULT_CAR_LIGHTS_PARAMS),
     ambient: structuredClone(DEFAULT_AMBIENT_SHADOW_PARAMS),
     logo: structuredClone(DEFAULT_LOGO_PARAMS),
@@ -114,9 +118,17 @@ export async function applySettings(
     strobing: false,
   });
   viewer.roofStrobe.stopFlash();
+  assignDeep(viewer.airflow.params, {
+    ...DEFAULT_AIRFLOW_PARAMS,
+    ...(settings.airflow ?? {}),
+  });
   assignDeep(viewer.carLights.params, settings.carLights);
   assignDeep(viewer.ambientShadows.params, settings.ambient);
-  assignDeep(viewer.logo.params, settings.logo);
+  assignDeep(viewer.logo.params, {
+    ...DEFAULT_LOGO_PARAMS,
+    ...(settings.logo ?? {}),
+  });
+  viewer.logo.params.mark = logoMarkIndex(viewer.logo.params.mark);
   {
     const saved = settings.dotGrid;
     // Migrate early/invisible placements (far + near-black panel from first shader pass).
@@ -131,6 +143,7 @@ export async function applySettings(
         ? { ...DEFAULT_DOT_GRID_PARAMS, flash: 0 }
         : { ...DEFAULT_DOT_GRID_PARAMS, ...saved, flash: 0 },
     );
+    viewer.dotGrid.params.mark = viewer.logo.params.mark;
   }
   assignDeep(viewer.effects.params, {
     ...settings.effects,
@@ -149,6 +162,7 @@ export async function applySettings(
   viewer.carMaterials.applyParams();
   viewer.softboxes.applyParams();
   viewer.roofStrobe.applyParams();
+  viewer.airflow.applyParams();
   viewer.carLights.applyParams();
   viewer.ambientShadows.applyParams();
   viewer.logo.applyParams();

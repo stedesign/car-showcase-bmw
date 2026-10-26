@@ -1,7 +1,6 @@
 import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
 import type { PlanesHandle } from '../planes';
-import type { TextsHandle } from '../texts';
 import type { EditorMode, Project, Scene, Selection } from '../project';
 import type { TimelineEngine } from '../timeline';
 import { renderHierarchy } from './hierarchy';
@@ -23,7 +22,6 @@ export type EditorShellOptions = {
   select: (kind: Selection['kind'], id: string | null) => void;
   cameras: CamerasHandle;
   planes: PlanesHandle;
-  texts: TextsHandle;
   timeline: TimelineEngine;
   getMasterTime: () => number;
   getMasterDuration: () => number;
@@ -38,6 +36,10 @@ export type EditorShellOptions = {
   onExport: () => void;
   onImport: (file: File) => void | Promise<void>;
   onReset: () => void | Promise<void>;
+  /** Restore storyboard scenes, cameras, and lights from the left sidebar. */
+  onResetSetup: () => void | Promise<void>;
+  /** Delete scene timeline keyframes and dedicated cameras. Free camera stays. */
+  onClearTimeline: () => void;
   onRecord: () => void;
   onStopRecord: () => void | Promise<void>;
   onTogglePreview: () => void;
@@ -48,6 +50,7 @@ export type EditorShellOptions = {
   onAddScene: () => void;
   onDuplicateScene: () => void;
   onDeleteScene: (sceneId: string) => void;
+  onDeleteAllScenes: () => void;
   onRenameScene: (sceneId: string, name: string) => void;
   setStatus: (msg: string) => void;
   isRecording: () => boolean;
@@ -116,6 +119,41 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
   });
   previewBtn.title = 'Toggle clean preview (how the timeline looks before export)';
 
+  const INSPECTOR_OPEN_KEY = 'wrt-director-inspector-open';
+  const inspectorBtn = document.createElement('button');
+  inspectorBtn.type = 'button';
+  inspectorBtn.className = 'ed-sb-toggle';
+  inspectorBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+    <defs>
+      <clipPath id="ed-inspector-toggle-clip">
+        <rect x="1.5" y="2.5" width="13" height="11" rx="1.6"></rect>
+      </clipPath>
+    </defs>
+    <g clip-path="url(#ed-inspector-toggle-clip)">
+      <rect class="ed-sb-pane" x="10.15" y="2.5" width="4.35" height="11"></rect>
+    </g>
+    <rect class="ed-sb-frame" x="1.5" y="2.5" width="13" height="11" rx="1.6"></rect>
+    <path class="ed-sb-split" d="M10.15 2.5v11"></path>
+  </svg>`;
+
+  const inspectorIsOpen = () => !root.classList.contains('inspector-collapsed');
+
+  const applyInspectorOpen = (open: boolean, persist = false) => {
+    root.classList.toggle('inspector-collapsed', !open);
+    inspectorBtn.classList.toggle('active', open);
+    const label = open ? 'Hide inspector' : 'Show inspector';
+    inspectorBtn.title = label;
+    inspectorBtn.setAttribute('aria-label', label);
+    inspectorBtn.setAttribute('aria-pressed', open ? 'true' : 'false');
+    if (persist) localStorage.setItem(INSPECTOR_OPEN_KEY, open ? '1' : '0');
+  };
+
+  applyInspectorOpen(localStorage.getItem(INSPECTOR_OPEN_KEY) !== '0');
+  inspectorBtn.addEventListener('click', () => {
+    applyInspectorOpen(!inspectorIsOpen(), true);
+    opts.viewer.notifyResize();
+  });
+
   const spacer = document.createElement('div');
   spacer.className = 'spacer';
 
@@ -129,6 +167,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     spacer,
     previewBtn,
     recordBtn,
+    inspectorBtn,
     importInput,
   );
 
@@ -175,6 +214,22 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
 
   const left = document.createElement('div');
   left.className = 'ed-left';
+  const leftScroll = document.createElement('div');
+  leftScroll.className = 'ed-left-scroll';
+  const sidebarActions = document.createElement('div');
+  sidebarActions.className = 'ed-sidebar-actions';
+  const clearTimelineBtn = mkBtn('Clear timeline & cameras', 'ed-sidebar-reset', () => {
+    opts.onClearTimeline();
+  });
+  clearTimelineBtn.title =
+    'Delete every timeline keyframe and every camera in this scene. Free camera stays.';
+  const resetSetupBtn = mkBtn('Reset cameras, lights, scenes', 'ed-sidebar-reset', () => {
+    void opts.onResetSetup();
+  });
+  resetSetupBtn.title =
+    'Restore scenes, cameras, and lights to the 60s loop. Master titles stay.';
+  sidebarActions.append(clearTimelineBtn, resetSetupBtn);
+  left.append(leftScroll, sidebarActions);
   const right = document.createElement('div');
   right.className = 'ed-right';
   const viewport = document.createElement('div');
@@ -266,6 +321,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     const mode = opts.getProject().editorMode;
     if (mode === bottomMode && (timelineUi || masterUi)) return;
 
+    masterUi?.dispose();
     timelineUi = null;
     masterUi = null;
     bottomMode = mode;
@@ -281,6 +337,9 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
         onSeek: opts.onSeek,
         onChange: onEdit,
         setStatus: opts.setStatus,
+        viewport,
+        getCanvas: () => opts.viewer.canvas,
+        isPlacementHidden: () => opts.isPreviewing() || opts.isRecording(),
       });
     } else {
       timelineUi = mountTimelineUi(timelineContent, {
@@ -293,6 +352,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
         onSeek: opts.onSeek,
         onCut: opts.onCut,
         onAnimate: opts.onAnimate,
+        onClearAll: opts.onClearTimeline,
         onChange: onEdit,
       });
     }
@@ -300,7 +360,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
 
   const refresh = () => {
     ensureBottomUi();
-    renderHierarchy(left, {
+    renderHierarchy(leftScroll, {
       viewer: opts.viewer,
       getProject: opts.getProject,
       getScene: opts.getScene,
@@ -308,13 +368,14 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       select: opts.select,
       cameras: opts.cameras,
       planes: opts.planes,
-      texts: opts.texts,
       onChange: onEdit,
       onSelectScene: opts.onSelectScene,
       onAddScene: opts.onAddScene,
       onDuplicateScene: opts.onDuplicateScene,
       onDeleteScene: opts.onDeleteScene,
+      onDeleteAllScenes: opts.onDeleteAllScenes,
       onRenameScene: opts.onRenameScene,
+      onClearScene: opts.onClearTimeline,
     });
     renderInspector(right, {
       viewer: opts.viewer,
@@ -323,7 +384,6 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       getSelection: opts.getSelection,
       cameras: opts.cameras,
       planes: opts.planes,
-      texts: opts.texts,
       onChange: onEdit,
       onLookEdit: opts.onEdit,
       setStatus: opts.setStatus,
@@ -413,6 +473,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     updatePlayhead() {
       if (opts.getProject().editorMode === 'master') masterUi?.updatePlayhead();
       else timelineUi?.updatePlayhead();
+      syncCameraChrome();
       refreshPreviewHud();
     },
     setChromeVisible(visible) {
@@ -425,6 +486,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     },
     dispose() {
       opts.viewer.setPostRender(null);
+      masterUi?.dispose();
       viewGizmo.dispose();
       cameraPreview.dispose();
       document.body.append(app);

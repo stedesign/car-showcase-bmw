@@ -1,10 +1,18 @@
 import * as THREE from 'three';
 import type { Reflector } from 'three/examples/jsm/objects/Reflector.js';
+import { rasterizeLogo, type LogoRaster } from './logoImage';
 
 export type LogoPreset = 'idle' | 'paddock' | 'strobe';
 
+/** 0 = WRT wordmark, 1 = WE ARE A TEAM. Timeline keys cut, they do not blend. */
+export function logoMarkIndex(value: number | undefined): 0 | 1 {
+  return typeof value === 'number' && value >= 0.5 ? 1 : 0;
+}
+
 export type WrtLogoParams = {
   enabled: boolean;
+  /** Which background mark is showing. See `logoMarkIndex`. */
+  mark: number;
   intensity: number;
   opacity: number;
   emissiveColor: string;
@@ -28,6 +36,7 @@ export type WrtLogoParams = {
 
 export const DEFAULT_LOGO_PARAMS: WrtLogoParams = {
   enabled: true,
+  mark: 0,
   intensity: 2.5,
   opacity: 0.91,
   emissiveColor: '#ffffff',
@@ -91,18 +100,27 @@ function createFloorFadeAlphaMap(fade: number): THREE.CanvasTexture {
   return tex;
 }
 
-export async function createWrtLogo(
-  textureUrl = '/brand/wrt-logo.png',
-): Promise<WrtLogoHandle> {
-  const params: WrtLogoParams = { ...DEFAULT_LOGO_PARAMS };
-  const group = new THREE.Group();
-  group.name = 'WrtLogo';
+type MarkLayer = {
+  mesh: THREE.Mesh;
+  floor: THREE.Mesh;
+  material: THREE.MeshBasicMaterial;
+  floorMaterial: THREE.MeshBasicMaterial;
+};
 
-  const map = await new THREE.TextureLoader().loadAsync(textureUrl);
+/** Stacked lockup is taller than the wide wordmark, still clear of the floor at default height. */
+const TEAM_MARK_FIT = 2.15;
+
+function makeMarkLayer(
+  raster: LogoRaster,
+  name: string,
+  fit: number,
+  color: string,
+  fadeAlphaMap: THREE.CanvasTexture,
+): MarkLayer {
+  const map = new THREE.CanvasTexture(raster.canvas);
   map.colorSpace = THREE.SRGBColorSpace;
   map.anisotropy = 8;
 
-  // Mirrored copy for the floor projection (reads as a reflection).
   const floorMap = map.clone();
   floorMap.colorSpace = THREE.SRGBColorSpace;
   floorMap.anisotropy = 8;
@@ -112,14 +130,10 @@ export async function createWrtLogo(
   floorMap.offset.y = 1;
   floorMap.needsUpdate = true;
 
-  const image = map.image as HTMLImageElement;
-  const aspect = image.width / image.height;
-  const geometry = new THREE.PlaneGeometry(aspect, 1);
-
-  // White-on-transparent mark → additive neon (storyboard Panel 8)
+  const geometry = new THREE.PlaneGeometry(raster.aspect * fit, fit);
   const material = new THREE.MeshBasicMaterial({
     map,
-    color: new THREE.Color(params.emissiveColor),
+    color: new THREE.Color(color),
     transparent: true,
     opacity: 1,
     side: THREE.DoubleSide,
@@ -127,16 +141,13 @@ export async function createWrtLogo(
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   });
-
   const mesh = new THREE.Mesh(geometry, material);
-  mesh.name = 'WrtLogoMain';
-  group.add(mesh);
+  mesh.name = name;
 
-  let fadeAlphaMap = createFloorFadeAlphaMap(params.reflectionFade);
-  const floorReflectionMaterial = new THREE.MeshBasicMaterial({
+  const floorMaterial = new THREE.MeshBasicMaterial({
     map: floorMap,
     alphaMap: fadeAlphaMap,
-    color: new THREE.Color(params.emissiveColor),
+    color: new THREE.Color(color),
     transparent: true,
     opacity: 1,
     side: THREE.DoubleSide,
@@ -144,13 +155,33 @@ export async function createWrtLogo(
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   });
+  const floor = new THREE.Mesh(geometry, floorMaterial);
+  floor.name = `${name}Floor`;
+  floor.rotation.x = -Math.PI / 2;
+  floor.renderOrder = 3;
 
-  // Flat on the ground: readable WRT stretch from the logo toward the camera.
-  const floorReflection = new THREE.Mesh(geometry, floorReflectionMaterial);
-  floorReflection.name = 'WrtLogoFloorReflection';
-  floorReflection.rotation.x = -Math.PI / 2;
-  floorReflection.renderOrder = 3;
-  group.add(floorReflection);
+  return { mesh, floor, material, floorMaterial };
+}
+
+export async function createWrtLogo(
+  textureUrl = '/brand/wrt-logo.png',
+  altTextureUrl = '/brand/we-are-a-team.svg',
+): Promise<WrtLogoHandle> {
+  const params: WrtLogoParams = { ...DEFAULT_LOGO_PARAMS };
+  const group = new THREE.Group();
+  group.name = 'WrtLogo';
+
+  const [wrtRaster, teamRaster] = await Promise.all([
+    rasterizeLogo(textureUrl, { maxEdge: 1024 }),
+    rasterizeLogo(altTextureUrl, { maxEdge: 2048 }),
+  ]);
+
+  let fadeAlphaMap = createFloorFadeAlphaMap(params.reflectionFade);
+  const layers = [
+    makeMarkLayer(wrtRaster, 'WrtLogoMain', 1, params.emissiveColor, fadeAlphaMap),
+    makeMarkLayer(teamRaster, 'TeamLogoMain', TEAM_MARK_FIT, params.emissiveColor, fadeAlphaMap),
+  ];
+  for (const layer of layers) group.add(layer.mesh, layer.floor);
 
   // Soft fill only — a strong point light creates a blown specular on the wet floor.
   const light = new THREE.PointLight(params.emissiveColor, 2.5, 16, 2.2);
@@ -168,36 +199,46 @@ export async function createWrtLogo(
     lastFade = params.reflectionFade;
     fadeAlphaMap.dispose();
     fadeAlphaMap = createFloorFadeAlphaMap(params.reflectionFade);
-    floorReflectionMaterial.alphaMap = fadeAlphaMap;
-    floorReflectionMaterial.needsUpdate = true;
+    for (const layer of layers) {
+      layer.floorMaterial.alphaMap = fadeAlphaMap;
+      layer.floorMaterial.needsUpdate = true;
+    }
   };
 
   const syncFloorReflection = (logoOp: number) => {
     const length = Math.max(0.2, params.reflectionLength);
-    // Parent scale already applies params.scale; stretch only along the floor axis.
-    floorReflection.scale.set(1, length, 1);
-    // Sit just above concrete overlay; start at the logo plane and extend toward +Z.
-    floorReflection.position.set(0, -params.height + 0.008, length * 0.5);
-    floorReflection.visible = params.enabled && params.reflectionEnabled;
-    floorReflectionMaterial.opacity =
+    const active = logoMarkIndex(params.mark);
+    const reflectionOpacity =
       logoOp * THREE.MathUtils.clamp(params.reflectionOpacity, 0, 1);
+    layers.forEach((layer, index) => {
+      const on = index === active;
+      layer.mesh.visible = params.enabled && on;
+      // Parent scale already applies params.scale; stretch only along the floor axis.
+      layer.floor.scale.set(1, length, 1);
+      // Sit just above concrete overlay; start at the logo plane and extend toward +Z.
+      layer.floor.position.set(0, -params.height + 0.008, length * 0.5);
+      layer.floor.visible = params.enabled && params.reflectionEnabled && on;
+      layer.floorMaterial.opacity = reflectionOpacity;
+    });
   };
 
   const applyParams = () => {
     group.visible = params.enabled;
     group.scale.setScalar(params.scale);
     group.position.set(0, params.height, -params.distance);
-    material.color.set(params.emissiveColor);
-    floorReflectionMaterial.color.set(params.emissiveColor);
+    for (const layer of layers) {
+      layer.material.color.set(params.emissiveColor);
+      layer.floorMaterial.color.set(params.emissiveColor);
+    }
     light.color.set(params.emissiveColor);
     syncReflectionFadeMap();
     if (!params.strobeEnabled) {
       const op = logoOpacity(params.intensity, 0.2);
-      material.opacity = op;
+      for (const layer of layers) layer.material.opacity = op;
       syncFloorReflection(op);
       light.intensity = params.intensity * 0.85;
     } else {
-      syncFloorReflection(material.opacity);
+      syncFloorReflection(layers[0].material.opacity);
     }
   };
 
@@ -249,7 +290,7 @@ export async function createWrtLogo(
     }
 
     const op = logoOpacity(level);
-    material.opacity = op;
+    for (const layer of layers) layer.material.opacity = op;
     syncFloorReflection(op);
     light.intensity = level * 0.85;
   };
@@ -258,13 +299,17 @@ export async function createWrtLogo(
     const previous = reflector.onBeforeRender;
     reflector.onBeforeRender = (renderer, scene, camera, geometryArg, materialArg, groupArg) => {
       const useFloor = params.enabled && params.reflectionEnabled;
-      const prevFloor = floorReflection.visible;
-      const prevMain = mesh.visible;
+      const previousVisibility = layers.map((layer) => ({
+        mesh: layer.mesh.visible,
+        floor: layer.floor.visible,
+      }));
 
       // Floor decal is the readable reflection — hide it and the elevated mark from the
       // mirror pass so we don't get a tiny competing speck under the logo.
-      floorReflection.visible = false;
-      if (useFloor) mesh.visible = false;
+      for (const layer of layers) {
+        layer.floor.visible = false;
+        if (useFloor) layer.mesh.visible = false;
+      }
 
       previous.call(
         reflector,
@@ -276,8 +321,10 @@ export async function createWrtLogo(
         groupArg,
       );
 
-      floorReflection.visible = prevFloor;
-      mesh.visible = prevMain;
+      layers.forEach((layer, index) => {
+        layer.mesh.visible = previousVisibility[index].mesh;
+        layer.floor.visible = previousVisibility[index].floor;
+      });
     };
   };
 

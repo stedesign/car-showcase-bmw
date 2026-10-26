@@ -107,6 +107,8 @@ export type TimelineUiApi = {
   onSeek: (t: number) => void;
   onCut: () => void;
   onAnimate: () => void;
+  /** Delete every keyframe and every dedicated camera. Free camera stays. */
+  onClearAll: () => void;
   onChange: () => void;
 };
 
@@ -133,9 +135,47 @@ function sameKeyRef(a: KeyRef, b: KeyRef): boolean {
 }
 
 type Row =
-  | { kind: 'header'; label: string }
-  | { kind: 'active'; label: string; track: TimelineTrack | null }
-  | { kind: 'keys'; label: string; nested: boolean; track: TimelineTrack };
+  | {
+      kind: 'header';
+      label: string;
+      groupId: string;
+      parentId: string | null;
+      depth: number;
+    }
+  | { kind: 'active'; label: string; track: TimelineTrack | null; groupId: string }
+  | { kind: 'keys'; label: string; nested: boolean; track: TimelineTrack; groupId: string | null };
+
+type TimelineTree = {
+  rows: Row[];
+  /** groupId → parent groupId (null = top-level). */
+  parents: Map<string, string | null>;
+};
+
+const COLLAPSE_KEY = 'wrt-director-timeline-collapsed';
+const TWIST_ICON =
+  '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">' +
+  '<path d="M2.2 3.5 L5 6.5 L7.8 3.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' +
+  '</svg>';
+
+function loadCollapsedGroups(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedGroups(ids: Set<string>) {
+  try {
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...ids]));
+  } catch {
+    /* quota or private mode */
+  }
+}
 
 function formatTime(t: number): string {
   const m = Math.floor(t / 60);
@@ -176,9 +216,10 @@ function holdSegments(track: TimelineTrack | null, duration: number): HoldSegmen
   return segs;
 }
 
-function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
+function buildRows(project: Scene, tracks: TimelineTrack[]): TimelineTree {
   const byTarget = new Map(tracks.map((t) => [t.target, t]));
   const rows: Row[] = [];
+  const parents = new Map<string, string | null>();
   const used = new Set<string>();
 
   const active = byTarget.get('camera.active') ?? null;
@@ -192,15 +233,30 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
   }
 
   if (active || cameraIds.size) {
-    rows.push({ kind: 'header', label: 'Cameras' });
-    rows.push({ kind: 'active', label: 'Active', track: active });
+    parents.set('cameras', null);
+    rows.push({
+      kind: 'header',
+      label: 'Cameras',
+      groupId: 'cameras',
+      parentId: null,
+      depth: 0,
+    });
+    rows.push({ kind: 'active', label: 'Active', track: active, groupId: 'cameras' });
     for (const cam of project.cameras) {
       if (!cameraIds.has(cam.id)) continue;
       const pose = byTarget.get(`camera.${cam.id}.pose`);
       if (!pose) continue;
       used.add(pose.target);
-      rows.push({ kind: 'header', label: cam.name });
-      rows.push({ kind: 'keys', label: 'Pose', nested: true, track: pose });
+      const groupId = `camera:${cam.id}`;
+      parents.set(groupId, 'cameras');
+      rows.push({
+        kind: 'header',
+        label: cam.name,
+        groupId,
+        parentId: 'cameras',
+        depth: 1,
+      });
+      rows.push({ kind: 'keys', label: 'Pose', nested: true, track: pose, groupId });
     }
     // Orphan pose tracks (camera deleted from list but keys remain)
     for (const t of tracks) {
@@ -208,8 +264,16 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
       const m = /^camera\.([^.]+)\.pose$/.exec(t.target);
       if (!m) continue;
       used.add(t.target);
-      rows.push({ kind: 'header', label: m[1] });
-      rows.push({ kind: 'keys', label: 'Pose', nested: true, track: t });
+      const groupId = `camera:${m[1]}`;
+      parents.set(groupId, 'cameras');
+      rows.push({
+        kind: 'header',
+        label: m[1],
+        groupId,
+        parentId: 'cameras',
+        depth: 1,
+      });
+      rows.push({ kind: 'keys', label: 'Pose', nested: true, track: t, groupId });
     }
   }
 
@@ -233,11 +297,6 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
       const g = ensureGroup(`plane:${parts[1]}`, plane?.name ?? parts[1]);
       g.items.push({ label: parts.slice(2).join('.') || t.target, track: t });
       used.add(t.target);
-    } else if (parts[0] === 'text' && parts[1]) {
-      const text = project.texts.find((x) => x.id === parts[1]);
-      const g = ensureGroup(`text:${parts[1]}`, text?.name ?? parts[1]);
-      g.items.push({ label: parts.slice(2).join('.') || t.target, track: t });
-      used.add(t.target);
     } else if (parts[0] === 'light' && parts[1]) {
       const g = ensureGroup(`light:${parts[1]}`, `Light ${parts[1].slice(-4)}`);
       g.items.push({ label: parts.slice(2).join('.') || t.target, track: t });
@@ -248,6 +307,10 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
       used.add(t.target);
     } else if (parts[0] === 'roofStrobe') {
       const g = ensureGroup('roofStrobe', 'Roof Strobe');
+      g.items.push({ label: parts.slice(1).join('.') || t.target, track: t });
+      used.add(t.target);
+    } else if (parts[0] === 'airflow') {
+      const g = ensureGroup('airflow', 'Airflow');
       g.items.push({ label: parts.slice(1).join('.') || t.target, track: t });
       used.add(t.target);
     } else if (parts[0] === 'lighting') {
@@ -265,6 +328,11 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
                 : prop;
       g.items.push({ label, track: t });
       used.add(t.target);
+    } else if (parts[0] === 'logo') {
+      const g = ensureGroup('logo', 'Logo');
+      const prop = parts[1] ?? t.target;
+      g.items.push({ label: prop === 'mark' ? 'Mark' : prop, track: t });
+      used.add(t.target);
     } else if (parts[0] === 'dotGrid') {
       const g = ensureGroup('dotGrid', 'Dot Grid WRT');
       g.items.push({ label: parts.slice(1).join('.') || t.target, track: t });
@@ -276,19 +344,58 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): Row[] {
     }
   }
 
-  for (const g of groups.values()) {
-    rows.push({ kind: 'header', label: g.title });
+  for (const [key, g] of groups) {
+    parents.set(key, null);
+    rows.push({
+      kind: 'header',
+      label: g.title,
+      groupId: key,
+      parentId: null,
+      depth: 0,
+    });
     for (const item of g.items) {
-      rows.push({ kind: 'keys', label: item.label, nested: true, track: item.track });
+      rows.push({
+        kind: 'keys',
+        label: item.label,
+        nested: true,
+        track: item.track,
+        groupId: key,
+      });
     }
   }
 
   for (const t of tracks) {
     if (used.has(t.target)) continue;
-    rows.push({ kind: 'keys', label: t.target, nested: false, track: t });
+    rows.push({ kind: 'keys', label: t.target, nested: false, track: t, groupId: null });
   }
 
-  return rows;
+  return { rows, parents };
+}
+
+function groupDepth(groupId: string | null, parents: Map<string, string | null>): number {
+  let depth = 0;
+  let id = groupId;
+  while (id) {
+    const parent = parents.get(id);
+    if (!parent) break;
+    depth += 1;
+    id = parent;
+  }
+  return depth;
+}
+
+/** True when `groupId` is `ancestor` or nested inside it. */
+function groupWithin(
+  groupId: string | null,
+  ancestor: string,
+  parents: Map<string, string | null>,
+): boolean {
+  let id = groupId;
+  while (id) {
+    if (id === ancestor) return true;
+    id = parents.get(id) ?? null;
+  }
+  return false;
 }
 
 export function mountTimelineUi(
@@ -330,6 +437,14 @@ export function mountTimelineUi(
   deleteBtn.title = 'Delete selected keyframes (Delete / Backspace)';
   deleteBtn.disabled = true;
 
+  const clearAllBtn = document.createElement('button');
+  clearAllBtn.className = 'ed-btn';
+  clearAllBtn.type = 'button';
+  clearAllBtn.textContent = 'Clear all';
+  clearAllBtn.title =
+    'Delete all timeline keyframes and cameras. Free camera stays.';
+  clearAllBtn.addEventListener('click', () => api.onClearAll());
+
   const timeLabel = document.createElement('span');
   timeLabel.className = 'ed-tl-time';
 
@@ -350,6 +465,12 @@ export function mountTimelineUi(
     api.onChange();
   });
   durLabel.append(durInput);
+
+  const foldBtn = document.createElement('button');
+  foldBtn.className = 'ed-btn ed-tl-fold-btn';
+  foldBtn.type = 'button';
+  foldBtn.title = 'Collapse all tracks';
+  foldBtn.textContent = 'Collapse';
 
   const curveBtn = document.createElement('button');
   curveBtn.className = 'ed-btn ed-tl-curve-btn';
@@ -379,6 +500,8 @@ export function mountTimelineUi(
     cutBtn,
     animateBtn,
     deleteBtn,
+    clearAllBtn,
+    foldBtn,
     curveBtn,
     channelSelect,
     timeLabel,
@@ -400,6 +523,9 @@ export function mountTimelineUi(
   let dragging = false;
   let curveMode = false;
   let selectedTrackId: string | null = null;
+  /** Group ids the user has folded. Survives timeline refreshes and reloads. */
+  const collapsedGroups = loadCollapsedGroups();
+  let groupIds: string[] = [];
   let selectedChannelId = 'value';
   /** Selected keyframes for multi-move / delete. */
   let selectedKeys: KeyRef[] = [];
@@ -409,6 +535,36 @@ export function mountTimelineUi(
   const syncPlayButton = () => {
     playBtn.textContent = api.timeline.state === 'playing' ? 'Pause' : 'Play';
   };
+
+  const allGroupsCollapsed = () =>
+    groupIds.length > 0 && groupIds.every((id) => collapsedGroups.has(id));
+
+  const syncFoldButton = () => {
+    const folded = allGroupsCollapsed();
+    foldBtn.disabled = groupIds.length === 0;
+    foldBtn.textContent = folded ? 'Expand' : 'Collapse';
+    foldBtn.title = folded ? 'Expand all tracks' : 'Collapse all tracks';
+    foldBtn.setAttribute('aria-pressed', folded ? 'true' : 'false');
+    foldBtn.classList.toggle('active', folded);
+  };
+
+  const setGroupCollapsed = (groupId: string, fold: boolean) => {
+    if (fold) collapsedGroups.add(groupId);
+    else collapsedGroups.delete(groupId);
+    saveCollapsedGroups(collapsedGroups);
+    refresh();
+  };
+
+  foldBtn.addEventListener('click', () => {
+    if (!groupIds.length) return;
+    const fold = !allGroupsCollapsed();
+    collapsedGroups.clear();
+    if (fold) {
+      for (const id of groupIds) collapsedGroups.add(id);
+    }
+    saveCollapsedGroups(collapsedGroups);
+    refresh();
+  });
 
   const isKeySelected = (ref: KeyRef) => selectedKeys.some((k) => sameKeyRef(k, ref));
 
@@ -1424,6 +1580,29 @@ export function mountTimelineUi(
 
     syncChannelSelect();
 
+    const tree = buildRows(project, tracks);
+    groupIds = [...tree.parents.keys()];
+    syncFoldButton();
+
+    const rowHidden = (row: Row) => {
+      let id = row.kind === 'header' ? row.parentId : row.groupId;
+      while (id) {
+        if (collapsedGroups.has(id)) return true;
+        id = tree.parents.get(id) ?? null;
+      }
+      return false;
+    };
+
+    const directChildCount = (groupId: string) => {
+      let count = 0;
+      for (const row of tree.rows) {
+        if (row.kind === 'header') {
+          if (row.parentId === groupId) count += 1;
+        } else if (row.groupId === groupId) count += 1;
+      }
+      return count;
+    };
+
     if (curveMode && selectedTrackId) {
       const track = tracks.find((t) => t.id === selectedTrackId);
       if (track && trackSupportsCurve(track)) {
@@ -1476,9 +1655,74 @@ export function mountTimelineUi(
     ruler.addEventListener('pointerdown', bindScrubDrag);
     tracksEl.append(ruler, playheadEl);
 
-    const rows = buildRows(project, tracks);
+    const appendGroupLabel = (row: Extract<Row, { kind: 'header' }>) => {
+      const folded = collapsedGroups.has(row.groupId);
+      const lab = document.createElement('div');
+      lab.className = 'ed-tl-label ed-tl-label-group';
+      if (row.depth > 0) lab.classList.add('ed-tl-label-group-nested');
+      lab.title = folded ? `Expand ${row.label}` : `Collapse ${row.label}`;
 
-    if (!rows.length) {
+      const twist = document.createElement('button');
+      twist.type = 'button';
+      twist.className = 'ed-twist';
+      if (folded) twist.classList.add('collapsed');
+      twist.setAttribute('aria-expanded', folded ? 'false' : 'true');
+      twist.setAttribute('aria-label', lab.title);
+      twist.innerHTML = TWIST_ICON;
+
+      const text = document.createElement('span');
+      text.className = 'ed-tl-label-text';
+      text.textContent = row.label;
+
+      const toggle = (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setGroupCollapsed(row.groupId, !folded);
+      };
+      twist.addEventListener('click', toggle);
+      lab.addEventListener('click', (event) => {
+        if ((event.target as HTMLElement).closest('.ed-twist')) return;
+        toggle(event);
+      });
+
+      lab.append(twist, text);
+      if (folded) {
+        const count = document.createElement('span');
+        count.className = 'ed-tl-fold-count';
+        count.textContent = String(directChildCount(row.groupId));
+        lab.append(count);
+      }
+      labels.append(lab);
+    };
+
+    const renderCollapsedSummary = (lane: HTMLElement, groupId: string) => {
+      const seen = new Set<string>();
+      for (const row of tree.rows) {
+        if (row.kind === 'header' || !row.track) continue;
+        if (!groupWithin(row.groupId, groupId, tree.parents)) continue;
+        if (seen.has(row.track.id)) continue;
+        seen.add(row.track.id);
+        if (row.kind === 'active') {
+          for (const seg of holdSegments(row.track, project.duration)) {
+            const bar = document.createElement('div');
+            bar.className = 'ed-tl-mini-bar';
+            bar.style.left = `${seg.start * PX_PER_SEC}px`;
+            bar.style.width = `${Math.max(4, (seg.end - seg.start) * PX_PER_SEC)}px`;
+            bar.style.background = colorForId(seg.cameraId);
+            lane.append(bar);
+          }
+          continue;
+        }
+        for (const key of row.track.keyframes) {
+          const dot = document.createElement('span');
+          dot.className = 'ed-tl-mini';
+          dot.style.left = `${key.t * PX_PER_SEC}px`;
+          lane.append(dot);
+        }
+      }
+    };
+
+    if (!tree.rows.length) {
       const empty = document.createElement('div');
       empty.className = 'ed-tl-empty';
       empty.textContent =
@@ -1488,27 +1732,37 @@ export function mountTimelineUi(
       return;
     }
 
-    for (const r of rows) {
+    for (const r of tree.rows) {
+      if (rowHidden(r)) continue;
       if (r.kind === 'header') {
-        appendLabel(r.label, 'ed-tl-label ed-tl-label-group');
+        appendGroupLabel(r);
         const spacer = makeTrackRow(project.duration);
         spacer.classList.add('ed-tl-track-group');
+        if (collapsedGroups.has(r.groupId)) renderCollapsedSummary(spacer, r.groupId);
         tracksEl.append(spacer);
         continue;
       }
       if (r.kind === 'active') {
-        appendLabel(r.label, 'ed-tl-label ed-tl-label-nested');
+        const depth = groupDepth(r.groupId, tree.parents);
+        appendLabel(
+          r.label,
+          depth > 0
+            ? 'ed-tl-label ed-tl-label-nested ed-tl-label-deep'
+            : 'ed-tl-label ed-tl-label-nested',
+        );
         const row = makeTrackRow(project.duration);
         row.classList.add('ed-tl-track-active');
         renderActiveRow(row, r.track, project);
         tracksEl.append(row);
         continue;
       }
-      appendTrackLabel(
-        r.label,
-        r.nested ? 'ed-tl-label ed-tl-label-nested' : 'ed-tl-label',
-        r.track,
-      );
+      const depth = groupDepth(r.groupId, tree.parents);
+      const nestedClass = r.nested
+        ? depth > 0
+          ? 'ed-tl-label ed-tl-label-nested ed-tl-label-deep'
+          : 'ed-tl-label ed-tl-label-nested'
+        : 'ed-tl-label';
+      appendTrackLabel(r.label, nestedClass, r.track);
       const row = makeTrackRow(project.duration);
       renderKeysRow(row, r.track);
       tracksEl.append(row);

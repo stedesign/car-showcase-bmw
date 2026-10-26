@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import {
+  enableEditorOverlayPicking,
+  markEditorOverlay,
+} from '../viewer/editorOverlays';
 import type { PlaneClip, Vec3 } from './project';
 import { cloneVec3, nextAuthoringId, vec3 } from './project';
 
@@ -70,11 +74,13 @@ export function createPlanesHandle(
 
   const transform = new TransformControls(camera, domElement);
   transform.setMode('translate');
-  transform.setSize(0.8);
+  transform.setSize(1.05);
   transform.enabled = false;
+  enableEditorOverlayPicking(transform);
   const helper = transform.getHelper();
   helper.visible = false;
   scene.add(helper);
+  markEditorOverlay(helper);
 
   let onTransformCommit: (() => void) | null = null;
 

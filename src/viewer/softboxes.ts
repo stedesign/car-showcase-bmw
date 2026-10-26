@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
 import { RectAreaLightHelper } from 'three/examples/jsm/helpers/RectAreaLightHelper.js';
+import { markEditorOverlay } from './editorOverlays';
 
 export type SoftboxParams = {
   enabled: boolean;
@@ -74,6 +75,7 @@ export function createSoftboxes(): SoftboxesHandle {
     light.name = `Softbox_${role}`;
     const helper = new RectAreaLightHelper(light);
     helper.visible = params.showHelpers;
+    markEditorOverlay(helper);
     light.add(helper);
     group.add(light);
     const entry = { light, helper, role };

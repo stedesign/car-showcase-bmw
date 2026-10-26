@@ -1,6 +1,6 @@
 # BMW M Hybrid V8 — WRT Director
 
-Three.js paddock viewer + **commercial video authoring** for the **#15 BMW M Hybrid V8** (Team WRT). Dial the wet-studio look, then direct cameras, lights, shadow planes, and titles on a timeline and export an H.264 MP4.
+Three.js paddock viewer + **commercial video authoring** for the **#15 BMW M Hybrid V8** (Team WRT). Dial the wet-studio look, then direct cameras, lights, and shadow planes on a timeline and export an H.264 MP4.
 
 ## Quick start
 
@@ -13,6 +13,7 @@ Open the local Vite URL (default `http://localhost:5173`).
 
 Default model: `public/models/bmw-m-hybrid-v8-15-wrt.glb`  
 WRT logo: `public/brand/wrt-logo.png`  
+Team lockup: `public/brand/we-are-a-team.svg` (timeline `logo.mark`, 0 = WRT, 1 = team)  
 Floor: `public/textures/concrete_floor/` — Poly Haven [concrete_floor](https://polyhaven.com/a/concrete_floor) (CC0)
 
 Drag-and-drop another `.glb` / `.gltf` onto the window to swap models.
@@ -21,7 +22,7 @@ Drag-and-drop another `.glb` / `.gltf` onto the window to swap models.
 
 | Panel | What it does |
 |--------|----------------|
-| **Left** | Scenes list (add / duplicate / delete) + hierarchy — cameras, lights, planes, texts |
+| **Left** | Scenes list (add / duplicate / delete) + hierarchy — cameras, lights, planes |
 | **Center** | 3D viewport (orbit when not playing) |
 | **Right** | Selection inspector + Look sections (display, softboxes, paint, FX, logo) |
 | **Bottom** | **Scene mode:** multi-track timeline. **Master mode:** clip strip that sequences scenes |
@@ -42,7 +43,7 @@ Older v2 project JSON files migrate automatically on import / load.
 
 1. Orbit to a hero frame → select a camera → **Capture view**.
 2. Add spot lights and matte **planes** for shadow wipes (planes cast shadows; softboxes are look-dev only).
-3. Add **text** (presets from car specs) — rendered in-canvas so it appears in the MP4.
+3. Add **text** — rendered in-canvas so it appears in the MP4.
 4. Scrub the playhead → **Cut** (switch camera) or **Animate** (move within a shot).
 5. Build the **Master** sequence → **Play** / **Preview** → **Record** to export `bmw-m-hybrid-v8-wrt.mp4`.
 
