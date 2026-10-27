@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { rasterizeLogo, type LogoRaster } from './logoImage';
+import { rasterizeBrandLine, rasterizeLogo, type LogoRaster } from './logoImage';
 import { logoMarkIndex } from './wrtLogo';
 
 export type DotGridPreset = 'idle' | 'pulse' | 'shockwave';
@@ -56,8 +56,10 @@ export type DotGridParams = {
   reflectionFade: number;
   /** How far the floor wash stretches toward the camera (world units). */
   reflectionLength: number;
-  /** Which logo mask is painted. 0 = WRT, 1 = WE ARE A TEAM. Kept in sync with `logo.mark`. */
+  /** Which logo mask is painted. 0 = WRT, 1 = stacked team, 2 = sliding line. Synced with `logo.mark`. */
   mark: number;
+  /** Marquee travel in screen-widths per second (mark 2 only). */
+  marqueeSpeed: number;
 };
 
 export const DEFAULT_DOT_GRID_PARAMS: DotGridParams = {
@@ -88,6 +90,7 @@ export const DEFAULT_DOT_GRID_PARAMS: DotGridParams = {
   reflectionFade: 0.78,
   reflectionLength: 3.4,
   mark: 0,
+  marqueeSpeed: 0.12,
 };
 
 function hash21(x: number, y: number, t: number): number {
@@ -144,11 +147,41 @@ function createFloorFadeAlphaMap(fade: number): THREE.CanvasTexture {
   return tex;
 }
 
+type MaskSource = {
+  raster: LogoRaster;
+  /** `contain` fits the whole mark; `marquee` height-fits a strip that can be wider than the wall. */
+  layout: 'contain' | 'marquee';
+  /** Fraction of the limiting axis (contain) or of wall height (marquee). */
+  contain: number;
+};
+
+type MaskGrid = {
+  data: Float32Array;
+  /** Horizontal period in cells. Equals cellsX for contain marks; may be wider for marquee. */
+  periodX: number;
+  cellsY: number;
+};
+
+function sampleLogoAlpha(
+  logoData: Uint8ClampedArray,
+  logoW: number,
+  logoH: number,
+  lu: number,
+  lv: number,
+): number {
+  if (lu < 0 || lu > 1 || lv < 0 || lv > 1) return 0;
+  const px = Math.min(logoW - 1, Math.max(0, Math.floor(lu * logoW)));
+  const py = Math.min(logoH - 1, Math.max(0, Math.floor((1 - lv) * logoH)));
+  const i = (py * logoW + px) * 4;
+  const a = Math.max(logoData[i + 3], logoData[i], logoData[i + 1], logoData[i + 2]) / 255;
+  return a > 0.2 ? Math.min(1, (a - 0.2) / 0.45) : 0;
+}
+
 /**
  * Precompute logo mask at cell centers for fast per-frame paints.
  * `contain` is how much of the limiting screen axis the mark may use (1 = edge to edge).
  */
-function buildMaskGrid(
+function buildContainMaskGrid(
   logoData: Uint8ClampedArray,
   logoW: number,
   logoH: number,
@@ -157,7 +190,7 @@ function buildMaskGrid(
   planeAspect: number,
   logoAspect: number,
   contain = 1,
-): Float32Array {
+): MaskGrid {
   const inset = Math.min(1, Math.max(0.05, contain));
   const mask = new Float32Array(cellsX * cellsY);
   for (let y = 0; y < cellsY; y++) {
@@ -173,18 +206,46 @@ function buildMaskGrid(
         lu = (u - 0.5) / inset + 0.5;
         lv = (v - 0.5) * (logoAspect / planeAspect) / inset + 0.5;
       }
-      if (lu < 0 || lu > 1 || lv < 0 || lv > 1) {
-        mask[y * cellsX + x] = 0;
-        continue;
-      }
-      const px = Math.min(logoW - 1, Math.max(0, Math.floor(lu * logoW)));
-      const py = Math.min(logoH - 1, Math.max(0, Math.floor((1 - lv) * logoH)));
-      const i = (py * logoW + px) * 4;
-      const a = Math.max(logoData[i + 3], logoData[i], logoData[i + 1], logoData[i + 2]) / 255;
-      mask[y * cellsX + x] = a > 0.2 ? Math.min(1, (a - 0.2) / 0.45) : 0;
+      mask[y * cellsX + x] = sampleLogoAlpha(logoData, logoW, logoH, lu, lv);
     }
   }
-  return mask;
+  return { data: mask, periodX: cellsX, cellsY };
+}
+
+/**
+ * Height-fit a wide strip; horizontal period can exceed the wall so only part shows at once.
+ * Trailing empty cells come from transparent padding in the SVG (loop gap).
+ */
+function buildMarqueeMaskGrid(
+  logoData: Uint8ClampedArray,
+  logoW: number,
+  logoH: number,
+  cellsX: number,
+  cellsY: number,
+  planeAspect: number,
+  logoAspect: number,
+  heightFill = 0.62,
+): MaskGrid {
+  const fill = Math.min(1, Math.max(0.2, heightFill));
+  // Logo height in plane-UV terms → width in UV → cells for one period.
+  const logoHeightUv = fill;
+  const logoWidthUv = logoHeightUv * (logoAspect / planeAspect);
+  const periodX = Math.max(cellsX + 1, Math.round(logoWidthUv * cellsX));
+  const mask = new Float32Array(periodX * cellsY);
+
+  for (let y = 0; y < cellsY; y++) {
+    const v = (y + 0.5) / cellsY;
+    const lv = (v - 0.5) / fill + 0.5;
+    for (let x = 0; x < periodX; x++) {
+      const uStrip = (x + 0.5) / periodX;
+      mask[y * periodX + x] = sampleLogoAlpha(logoData, logoW, logoH, uStrip, lv);
+    }
+  }
+  return { data: mask, periodX, cellsY };
+}
+
+function wrapIndex(i: number, n: number): number {
+  return ((i % n) + n) % n;
 }
 
 export async function createDottedWrtScreen(
@@ -198,13 +259,19 @@ export async function createDottedWrtScreen(
   // Outlined letters are ~2px on a 394-wide SVG. Cell centers are ~9px apart
   // on this wall, so the mask raster uses a heavier stroke or the outlines vanish.
   // The stacked lockup is much taller than the WRT wordmark; keep it inside the wall.
+  // The marquee line is height-fitted and free to be wider than the screen.
   const TEAM_DOT_CONTAIN = 0.72;
-  const sources: Array<{ raster: LogoRaster; contain: number }> = [
-    { raster: await rasterizeLogo(textureUrl, { maxEdge: 1024 }), contain: 1 },
-    {
-      raster: await rasterizeLogo(altTextureUrl, { maxEdge: 1600, minStrokeWidth: 9 }),
-      contain: TEAM_DOT_CONTAIN,
-    },
+  // Near full wall height so LED cells resolve counters / stroke weight cleanly.
+  const TEAM_LINE_HEIGHT = 0.94;
+  const [wrtRaster, teamRaster] = await Promise.all([
+    rasterizeLogo(textureUrl, { maxEdge: 1024 }),
+    rasterizeLogo(altTextureUrl, { maxEdge: 1600, minStrokeWidth: 9 }),
+  ]);
+  const lineRaster = rasterizeBrandLine('WE ARE A TEAM', { height: 512 });
+  const sources: MaskSource[] = [
+    { raster: wrtRaster, layout: 'contain', contain: 1 },
+    { raster: teamRaster, layout: 'contain', contain: TEAM_DOT_CONTAIN },
+    { raster: lineRaster, layout: 'marquee', contain: TEAM_LINE_HEIGHT },
   ];
 
   const paint = document.createElement('canvas');
@@ -297,7 +364,7 @@ export async function createDottedWrtScreen(
   let lastFade = params.reflectionFade;
   let cellsX = 0;
   let cellsY = 0;
-  let maskGrids: Float32Array[] = [];
+  let maskGrids: MaskGrid[] = [];
   let maskDirty = true;
   let elapsed = 0;
 
@@ -306,21 +373,38 @@ export async function createDottedWrtScreen(
     cellsX = Math.max(8, Math.round(params.density));
     cellsY = Math.max(8, Math.round(params.density / aspect));
     maskGrids = sources.map((src) =>
-      buildMaskGrid(
-        src.raster.data,
-        src.raster.width,
-        src.raster.height,
-        cellsX,
-        cellsY,
-        aspect,
-        src.raster.aspect,
-        src.contain,
-      ),
+      src.layout === 'marquee'
+        ? buildMarqueeMaskGrid(
+            src.raster.data,
+            src.raster.width,
+            src.raster.height,
+            cellsX,
+            cellsY,
+            aspect,
+            src.raster.aspect,
+            src.contain,
+          )
+        : buildContainMaskGrid(
+            src.raster.data,
+            src.raster.width,
+            src.raster.height,
+            cellsX,
+            cellsY,
+            aspect,
+            src.raster.aspect,
+            src.contain,
+          ),
     );
     maskDirty = false;
   };
 
   const activeMask = () => maskGrids[logoMarkIndex(params.mark)] ?? maskGrids[0];
+
+  const sampleMask = (grid: MaskGrid, cellX: number, cellY: number, scrollCells: number) => {
+    const mx = wrapIndex(cellX + Math.floor(scrollCells), grid.periodX);
+    const my = Math.min(grid.cellsY - 1, Math.max(0, cellY));
+    return grid.data[my * grid.periodX + mx] ?? 0;
+  };
 
   const syncFloorReflection = () => {
     const length = Math.max(0.2, params.reflectionLength);
@@ -466,6 +550,11 @@ export async function createDottedWrtScreen(
     const wavePhase = elapsed * params.waveSpeed * Math.PI * 2;
     const reveal = effectiveReveal();
     const maskGrid = activeMask();
+    const markId = logoMarkIndex(params.mark);
+    const scrollCells =
+      markId === 2
+        ? elapsed * Math.max(0, params.marqueeSpeed) * cellsX
+        : 0;
 
     // Pass 1 — soft halos under logo / hot dots (feeds bloom + additive layer).
     if (glowAmt > 0.01) {
@@ -473,7 +562,7 @@ export async function createDottedWrtScreen(
         for (let x = 0; x < cellsX; x++) {
           const u = (x + 0.5) / cellsX;
           const v = (y + 0.5) / cellsY;
-          const mask = maskGrid[y * cellsX + x] ?? 0;
+          const mask = sampleMask(maskGrid, x, y, scrollCells);
           const wipe = THREE.MathUtils.smoothstep(reveal, u - 0.12, u + 0.04);
           const logo = mask * wipe;
           if (logo < 0.08 && mode !== 2 && mode !== 3 && mode !== 4) continue;
@@ -523,7 +612,7 @@ export async function createDottedWrtScreen(
       for (let x = 0; x < cellsX; x++) {
         const u = (x + 0.5) / cellsX;
         const v = (y + 0.5) / cellsY;
-        const mask = maskGrid[y * cellsX + x] ?? 0;
+        const mask = sampleMask(maskGrid, x, y, scrollCells);
         const wipe = THREE.MathUtils.smoothstep(reveal, u - 0.12, u + 0.04);
         const logo = mask * wipe;
 
@@ -691,7 +780,8 @@ export async function createDottedWrtScreen(
     params.flash = flashEnergy;
 
     accum += dt;
-    if (accum >= 1 / 30 || flashEnergy > 0.01 || mode === 7) {
+    const marquee = logoMarkIndex(params.mark) === 2 && params.marqueeSpeed > 0.001;
+    if (accum >= 1 / 30 || flashEnergy > 0.01 || mode === 7 || marquee) {
       accum = 0;
       paintFrame();
     }

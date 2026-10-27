@@ -1,12 +1,19 @@
 import * as THREE from 'three';
 import type { Reflector } from 'three/examples/jsm/objects/Reflector.js';
-import { rasterizeLogo, type LogoRaster } from './logoImage';
+import { rasterizeBrandLine, rasterizeLogo, type LogoRaster } from './logoImage';
 
 export type LogoPreset = 'idle' | 'paddock' | 'strobe';
 
-/** 0 = WRT wordmark, 1 = WE ARE A TEAM. Timeline keys cut, they do not blend. */
-export function logoMarkIndex(value: number | undefined): 0 | 1 {
-  return typeof value === 'number' && value >= 0.5 ? 1 : 0;
+/** 0 = WRT wordmark, 1 = stacked WE ARE A TEAM, 2 = horizontal marquee line. */
+export type LogoMarkId = 0 | 1 | 2;
+
+/** Timeline keys cut between marks — they do not blend. */
+export function logoMarkIndex(value: number | undefined): LogoMarkId {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  const n = Math.round(value);
+  if (n <= 0) return 0;
+  if (n === 1) return 1;
+  return 2;
 }
 
 export type WrtLogoParams = {
@@ -109,6 +116,8 @@ type MarkLayer = {
 
 /** Stacked lockup is taller than the wide wordmark, still clear of the floor at default height. */
 const TEAM_MARK_FIT = 2.15;
+/** Single-line lockup — tall enough to read, still clear of the floor. */
+const TEAM_LINE_FIT = 0.9;
 
 function makeMarkLayer(
   raster: LogoRaster,
@@ -175,11 +184,13 @@ export async function createWrtLogo(
     rasterizeLogo(textureUrl, { maxEdge: 1024 }),
     rasterizeLogo(altTextureUrl, { maxEdge: 2048 }),
   ]);
+  const lineRaster = rasterizeBrandLine('WE ARE A TEAM', { height: 512 });
 
   let fadeAlphaMap = createFloorFadeAlphaMap(params.reflectionFade);
   const layers = [
     makeMarkLayer(wrtRaster, 'WrtLogoMain', 1, params.emissiveColor, fadeAlphaMap),
     makeMarkLayer(teamRaster, 'TeamLogoMain', TEAM_MARK_FIT, params.emissiveColor, fadeAlphaMap),
+    makeMarkLayer(lineRaster, 'TeamLineLogoMain', TEAM_LINE_FIT, params.emissiveColor, fadeAlphaMap),
   ];
   for (const layer of layers) group.add(layer.mesh, layer.floor);
 

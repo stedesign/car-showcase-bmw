@@ -35,10 +35,17 @@ const FADE_OUT_SEC = 0.45;
 /** Streak motion is quieter while the fill is still growing in. */
 const GROW_FLOW_SCALE = 0.22;
 
+export type AirflowEnabledKey = { t: number; value: boolean };
+
 export type AirflowHandle = {
   group: THREE.Group;
   params: AirflowParams;
   applyParams: () => void;
+  /**
+   * Drive grow / fade from the `airflow.enabled` timeline track so the fill
+   * follows the playhead between Off → On (and fades Off → without reversing).
+   */
+  syncTimeline: (timelineTime: number, enabledKeys: AirflowEnabledKey[]) => void;
   /** Fit the streams to the car after load / reframe. Nose is +Z. */
   setFromCarBounds: (box: THREE.Box3) => void;
   /** Hide with the car without changing `enabled`. */
@@ -46,6 +53,40 @@ export type AirflowHandle = {
   update: (dt: number, camera: THREE.Camera) => void;
   dispose: () => void;
 };
+
+/** Grow across Off→On; fade across On→Off. */
+export function evalAirflowEnabledKeys(
+  keysIn: AirflowEnabledKey[],
+  t: number,
+): { reveal: number; fade: number } {
+  if (!keysIn.length) return { reveal: 0, fade: 0 };
+  const keys = [...keysIn].sort((a, b) => a.t - b.t);
+
+  if (t <= keys[0].t) {
+    return keys[0].value ? { reveal: 1, fade: 1 } : { reveal: 1, fade: 0 };
+  }
+  const last = keys[keys.length - 1]!;
+  if (t >= last.t) {
+    return last.value ? { reveal: 1, fade: 1 } : { reveal: 1, fade: 0 };
+  }
+
+  let i = 0;
+  while (i < keys.length - 1 && keys[i + 1]!.t < t) i += 1;
+  const a = keys[i]!;
+  const b = keys[i + 1]!;
+  const u = (t - a.t) / Math.max(1e-6, b.t - a.t);
+
+  if (!a.value && b.value) {
+    // Spreading from the nose as we approach On.
+    return { reveal: THREE.MathUtils.clamp(u, 0, 1), fade: 1 };
+  }
+  if (a.value && !b.value) {
+    // Keep the filled shape; only fade out toward Off.
+    return { reveal: 1, fade: 1 - THREE.MathUtils.clamp(u, 0, 1) };
+  }
+  if (a.value && b.value) return { reveal: 1, fade: 1 };
+  return { reveal: 1, fade: 0 };
+}
 
 /**
  * Normalized car space. x: −1 left … +1 right (half-width).
@@ -394,6 +435,8 @@ export function createAirflow(): AirflowHandle {
   let fade = params.enabled ? 1 : 0;
   let fadeTarget = fade;
   let wasWanted = false;
+  /** When true, reveal/fade follow the enabled timeline track (not wall-clock). */
+  let timelineDriving = false;
 
   const clearRibbons = () => {
     for (const ribbon of ribbons) {
@@ -407,7 +450,9 @@ export function createAirflow(): AirflowHandle {
   const wanted = () => params.enabled && carVisible;
 
   const syncVisible = () => {
-    group.visible = placed && fade > 0.001;
+    // Visible while growing (reveal) or fading, even if enabled is still false
+    // between Off → On keys on the timeline.
+    group.visible = placed && carVisible && fade > 0.001 && reveal > 0.001;
   };
 
   const flowSpeed = () => {
@@ -433,6 +478,7 @@ export function createAirflow(): AirflowHandle {
   };
 
   const applyParams = () => {
+    timelineDriving = false;
     const on = wanted();
     if (on && !wasWanted) {
       // Fresh activate — grow from the nose, fully opaque.
@@ -445,9 +491,25 @@ export function createAirflow(): AirflowHandle {
     } else {
       fadeTarget = 1;
       if (fade < 0.001) fade = 1;
-      if (reveal < 0.001) reveal = 1;
+      // Do not snap reveal — a grow may already be in progress.
     }
     wasWanted = on;
+    syncVisible();
+    pushUniforms();
+  };
+
+  const syncTimeline = (timelineTime: number, enabledKeys: AirflowEnabledKey[]) => {
+    if (!enabledKeys.length) {
+      // No On/Off animation — keep whatever UI / look state we have.
+      pushUniforms();
+      return;
+    }
+    timelineDriving = true;
+    const next = evalAirflowEnabledKeys(enabledKeys, timelineTime);
+    reveal = next.reveal;
+    fade = next.fade;
+    fadeTarget = next.fade;
+    wasWanted = wanted();
     syncVisible();
     pushUniforms();
   };
@@ -530,14 +592,16 @@ export function createAirflow(): AirflowHandle {
     if (!placed) return;
     time += dt;
 
-    if (wanted() && reveal < 1) {
-      reveal = Math.min(1, reveal + dt / GROW_IN_SEC);
-    }
+    if (!timelineDriving) {
+      if (wanted() && reveal < 1) {
+        reveal = Math.min(1, reveal + dt / GROW_IN_SEC);
+      }
 
-    if (fade < fadeTarget) {
-      fade = Math.min(1, fade + dt / FADE_OUT_SEC);
-    } else if (fade > fadeTarget) {
-      fade = Math.max(0, fade - dt / FADE_OUT_SEC);
+      if (fade < fadeTarget) {
+        fade = Math.min(1, fade + dt / FADE_OUT_SEC);
+      } else if (fade > fadeTarget) {
+        fade = Math.max(0, fade - dt / FADE_OUT_SEC);
+      }
     }
 
     syncVisible();
@@ -554,6 +618,7 @@ export function createAirflow(): AirflowHandle {
     group,
     params,
     applyParams,
+    syncTimeline,
     setFromCarBounds,
     setCarVisible,
     update,

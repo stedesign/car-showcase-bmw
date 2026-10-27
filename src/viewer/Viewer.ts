@@ -23,6 +23,7 @@ import { createCarMaterials, type CarMaterialsHandle } from './carMaterials';
 import { createSoftboxes, type SoftboxesHandle } from './softboxes';
 import { createRoofStrobe, type RoofStrobeHandle } from './roofStrobe';
 import { createAirflow, type AirflowHandle } from './airflow';
+import { createCarMotion, type CarMotionHandle } from './carMotion';
 import {
   EDITOR_OVERLAY_LAYER,
   renderEditorOverlays,
@@ -146,6 +147,7 @@ export class Viewer {
   softboxes!: SoftboxesHandle;
   roofStrobe!: RoofStrobeHandle;
   airflow!: AirflowHandle;
+  motion!: CarMotionHandle;
 
   private container: HTMLElement;
   private modelRoot = new THREE.Group();
@@ -167,6 +169,10 @@ export class Viewer {
   private postRender: (() => void) | null = null;
   private screenOverlay: ((renderer: THREE.WebGLRenderer) => void) | null = null;
   private extraShadowExcludes: THREE.Object3D[] = [];
+  /** When true, keep the last drawn frame (no tick / no clear). */
+  private holdFrame = false;
+  private lastDrawW = 0;
+  private lastDrawH = 0;
 
   constructor(container: HTMLElement, onStatus?: (msg: string) => void) {
     this.container = container;
@@ -270,6 +276,7 @@ export class Viewer {
     this.scene.add(this.roofStrobe.group);
     this.airflow = createAirflow();
     this.scene.add(this.airflow.group);
+    this.motion = createCarMotion();
 
     window.addEventListener('resize', this.onResize);
   }
@@ -361,6 +368,18 @@ export class Viewer {
     this.onResize();
   }
 
+  /**
+   * Freeze the canvas on the last beauty frame. Used during master scene cuts so
+   * an async look/env apply cannot flash an intermediate state.
+   */
+  setHoldFrame(hold: boolean) {
+    this.holdFrame = hold;
+  }
+
+  get isHoldingFrame() {
+    return this.holdFrame;
+  }
+
   private setStatus(msg: string) {
     this.onStatus?.(msg);
   }
@@ -394,6 +413,7 @@ export class Viewer {
     }
 
     this.carLights.unbind();
+    this.motion.unbind();
 
     while (this.modelRoot.children.length) {
       const child = this.modelRoot.children[0];
@@ -430,6 +450,8 @@ export class Viewer {
     // Frame onto the floor first so ground-glow anchors sit correctly.
     this.frameObject(this.modelRoot);
     this.carLights.bind(root, this.scene);
+    // Split combined wheel mesh into hub pivots after framing.
+    this.motion.bind(this.modelRoot);
     this.setStatus(`Loaded ${nameHint ?? 'model'}`);
   }
 
@@ -647,6 +669,12 @@ export class Viewer {
   private onResize = () => {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
+    if (w < 1 || h < 1) return;
+    // setSize / composer.resize clear buffers — skip when unchanged to avoid
+    // a one-frame flash on every UI refresh (e.g. master scene cuts).
+    if (w === this.lastDrawW && h === this.lastDrawH) return;
+    this.lastDrawW = w;
+    this.lastDrawH = h;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
@@ -657,15 +685,25 @@ export class Viewer {
     const tick = () => {
       if (this.disposed) return;
       requestAnimationFrame(tick);
+      if (this.holdFrame) {
+        // Drain the clock so the next live frame does not jump, but keep the
+        // previous drawing buffer (preserveDrawingBuffer is on).
+        this.clock.getDelta();
+        return;
+      }
       const dt = this.clock.getDelta();
       const elapsed = this.clock.elapsedTime;
       this.externalTick?.(dt, elapsed);
+      // Scene cuts set hold mid-tick (async look apply). Skip the beauty pass
+      // so we never present rest-pose / half-applied settings for one frame.
+      if (this.holdFrame) return;
       this.controls.update();
       this.customLights?.update();
       this.logo?.update(elapsed);
       this.dotGrid?.update(dt, elapsed);
       this.roofStrobe?.update(dt);
       this.airflow?.update(dt, this.camera);
+      this.motion?.update(dt);
       this.effects.update(dt, elapsed);
       if (this.carVisible) {
         this.ambientShadows?.update(this.renderer, this.scene, [
@@ -707,6 +745,7 @@ export class Viewer {
     this.softboxes?.dispose();
     this.roofStrobe?.dispose();
     this.airflow?.dispose();
+    this.motion?.dispose();
     this.controls.dispose();
     this.renderer.dispose();
     for (const entry of this.hdrCache.values()) {

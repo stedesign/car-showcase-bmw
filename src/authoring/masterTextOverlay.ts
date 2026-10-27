@@ -250,8 +250,13 @@ function layoutWords(
 
   const marginX = Math.round(frameW * 0.07);
   const marginY = Math.round(frameH * 0.1);
-  const maxWidth = Math.max(32, frameW - marginX * 2);
+  const frameMaxW = Math.max(32, frameW - marginX * 2);
   const maxHeight = Math.max(32, frameH - marginY * 2);
+  const boxed =
+    Number.isFinite(clip.boxW) && (clip.boxW as number) > 0
+      ? Math.max(32, Math.min(frameW, (clip.boxW as number) * frameW))
+      : 0;
+  const maxWidth = boxed || frameMaxW;
 
   const paragraphs = text
     .split('\n')
@@ -275,47 +280,54 @@ function layoutWords(
     return width <= maxWidth + 0.5 && height <= maxHeight + 0.5;
   };
 
-  // Keep each paragraph on one line and shrink until it fits. Wrap only when
-  // even the smallest size is still wider than the frame.
-  let lo = 12;
-  let hi = Math.max(12, requestedPx);
-  let fontPx = lo;
+  let fontPx: number;
   let lines: string[];
-  if (unwrapped(hi).width <= maxWidth + 0.5 && unwrapped(hi).height <= maxHeight + 0.5) {
-    fontPx = hi;
-    lines = paragraphs;
+  if (boxed) {
+    // Fixed wrap box: keep the authored size and reflow into the width.
+    fontPx = Math.max(12, requestedPx);
+    lines = wrapLines(ctx, text, fontPx, weight, family, maxWidth);
   } else {
-    let fitUnwrapped = false;
-    for (let i = 0; i < 14; i += 1) {
-      const mid = (lo + hi) / 2;
-      const box = unwrapped(mid);
-      if (box.width <= maxWidth + 0.5 && box.height <= maxHeight + 0.5) {
-        fontPx = mid;
-        fitUnwrapped = true;
-        lo = mid;
-      } else {
-        hi = mid;
-      }
-    }
-    if (fitUnwrapped) {
+    // Keep each paragraph on one line and shrink until it fits. Wrap only when
+    // even the smallest size is still wider than the frame.
+    let lo = 12;
+    let hi = Math.max(12, requestedPx);
+    fontPx = lo;
+    if (unwrapped(hi).width <= maxWidth + 0.5 && unwrapped(hi).height <= maxHeight + 0.5) {
+      fontPx = hi;
       lines = paragraphs;
-    } else if (wrappedFits(Math.max(12, requestedPx))) {
-      fontPx = Math.max(12, requestedPx);
-      lines = wrapLines(ctx, text, fontPx, weight, family, maxWidth);
     } else {
-      lo = 12;
-      hi = Math.max(12, requestedPx);
-      fontPx = lo;
+      let fitUnwrapped = false;
       for (let i = 0; i < 14; i += 1) {
         const mid = (lo + hi) / 2;
-        if (wrappedFits(mid)) {
+        const box = unwrapped(mid);
+        if (box.width <= maxWidth + 0.5 && box.height <= maxHeight + 0.5) {
           fontPx = mid;
+          fitUnwrapped = true;
           lo = mid;
         } else {
           hi = mid;
         }
       }
-      lines = wrapLines(ctx, text, fontPx, weight, family, maxWidth);
+      if (fitUnwrapped) {
+        lines = paragraphs;
+      } else if (wrappedFits(Math.max(12, requestedPx))) {
+        fontPx = Math.max(12, requestedPx);
+        lines = wrapLines(ctx, text, fontPx, weight, family, maxWidth);
+      } else {
+        lo = 12;
+        hi = Math.max(12, requestedPx);
+        fontPx = lo;
+        for (let i = 0; i < 14; i += 1) {
+          const mid = (lo + hi) / 2;
+          if (wrappedFits(mid)) {
+            fontPx = mid;
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+        }
+        lines = wrapLines(ctx, text, fontPx, weight, family, maxWidth);
+      }
     }
   }
   const lineH = fontPx * lineHeight;
@@ -326,7 +338,8 @@ function layoutWords(
     const lineW = widths.reduce((sum, w, i) => sum + w + (i ? space : 0), 0);
     return { parts, widths, lineW };
   });
-  const blockW = Math.max(0, ...lineMetrics.map((line) => line.lineW));
+  const contentW = Math.max(0, ...lineMetrics.map((line) => line.lineW));
+  const blockW = boxed || contentW;
   const blockH = Math.max(lines.length, 1) * lineH;
 
   let originX: number;
@@ -536,9 +549,12 @@ function paintMarquee(
     family,
   );
   if (!band || band.copyW < 1) return;
-  // Stay fully up at the in-point so a paused playhead still shows the line.
+  const fadeIn = Math.min(FADE_IN, clip.duration * 0.25);
+  const fadeOut = Math.min(0.35, clip.duration * 0.25);
   const alpha =
-    fadeEdge(local, clip.duration, Math.min(0.35, clip.duration * 0.25)) * layerOpacity(clip);
+    smooth(fadeIn > 0 ? local / fadeIn : 1) *
+    fadeEdge(local, clip.duration, fadeOut) *
+    layerOpacity(clip);
   if (alpha <= 0.001) return;
   const speed = typeof clip.speed === 'number' && Number.isFinite(clip.speed) ? clip.speed : 0.15;
   const x0 = marqueeOffset(marqueeStart(clip.align, frameW, band.copyW), local * speed * frameW, band.period);

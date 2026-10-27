@@ -1,12 +1,15 @@
-import type {
-  CameraPoseValue,
-  CubicBezier,
-  Keyframe,
-  KeyframeValue,
-  Scene,
-  Selection,
-  TimelineTrack,
-  Vec3,
+import {
+  normalizeAllMasterClips,
+  pruneMasterTextsToDuration,
+  type CameraPoseValue,
+  type CubicBezier,
+  type Keyframe,
+  type KeyframeValue,
+  type Project,
+  type Scene,
+  type Selection,
+  type TimelineTrack,
+  type Vec3,
 } from '../project';
 import type { TimelineEngine } from '../timeline';
 import { cubicBezierEase, resolveBezier } from '../bezier';
@@ -98,6 +101,7 @@ function sampleCurve(
 }
 
 export type TimelineUiApi = {
+  getProject: () => Project;
   getScene: () => Scene;
   getSelection: () => Selection;
   timeline: TimelineEngine;
@@ -111,6 +115,13 @@ export type TimelineUiApi = {
   onClearAll: () => void;
   onChange: () => void;
 };
+
+/** Keep master clip outs inside the scene after a duration edit. */
+function syncMasterAfterSceneDuration(api: TimelineUiApi) {
+  const project = api.getProject();
+  if (!normalizeAllMasterClips(project)) return;
+  pruneMasterTextsToDuration(project);
+}
 
 export type TimelineUiHandle = {
   refresh: () => void;
@@ -228,7 +239,7 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): TimelineTree {
   const cameraIds = new Set<string>();
   for (const c of project.cameras) cameraIds.add(c.id);
   for (const t of tracks) {
-    const m = /^camera\.([^.]+)\.pose$/.exec(t.target);
+    const m = /^camera\.([^.]+)\.(pose|pathProgress)$/.exec(t.target);
     if (m) cameraIds.add(m[1]);
   }
 
@@ -245,8 +256,10 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): TimelineTree {
     for (const cam of project.cameras) {
       if (!cameraIds.has(cam.id)) continue;
       const pose = byTarget.get(`camera.${cam.id}.pose`);
-      if (!pose) continue;
-      used.add(pose.target);
+      const progress = byTarget.get(`camera.${cam.id}.pathProgress`);
+      if (!pose && !progress) continue;
+      if (pose) used.add(pose.target);
+      if (progress) used.add(progress.target);
       const groupId = `camera:${cam.id}`;
       parents.set(groupId, 'cameras');
       rows.push({
@@ -256,24 +269,53 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): TimelineTree {
         parentId: 'cameras',
         depth: 1,
       });
-      rows.push({ kind: 'keys', label: 'Pose', nested: true, track: pose, groupId });
+      if (pose) {
+        rows.push({ kind: 'keys', label: 'Pose', nested: true, track: pose, groupId });
+      }
+      if (progress) {
+        rows.push({
+          kind: 'keys',
+          label: 'Path Progress',
+          nested: true,
+          track: progress,
+          groupId,
+        });
+      }
     }
-    // Orphan pose tracks (camera deleted from list but keys remain)
+    // Orphan pose / pathProgress tracks (camera deleted from list but keys remain)
+    const orphanCamIds = new Set<string>();
     for (const t of tracks) {
       if (used.has(t.target)) continue;
-      const m = /^camera\.([^.]+)\.pose$/.exec(t.target);
+      const m = /^camera\.([^.]+)\.(pose|pathProgress)$/.exec(t.target);
       if (!m) continue;
-      used.add(t.target);
-      const groupId = `camera:${m[1]}`;
+      orphanCamIds.add(m[1]);
+    }
+    for (const camId of orphanCamIds) {
+      const pose = byTarget.get(`camera.${camId}.pose`);
+      const progress = byTarget.get(`camera.${camId}.pathProgress`);
+      const groupId = `camera:${camId}`;
       parents.set(groupId, 'cameras');
       rows.push({
         kind: 'header',
-        label: m[1],
+        label: camId,
         groupId,
         parentId: 'cameras',
         depth: 1,
       });
-      rows.push({ kind: 'keys', label: 'Pose', nested: true, track: t, groupId });
+      if (pose && !used.has(pose.target)) {
+        used.add(pose.target);
+        rows.push({ kind: 'keys', label: 'Pose', nested: true, track: pose, groupId });
+      }
+      if (progress && !used.has(progress.target)) {
+        used.add(progress.target);
+        rows.push({
+          kind: 'keys',
+          label: 'Path Progress',
+          nested: true,
+          track: progress,
+          groupId,
+        });
+      }
     }
   }
 
@@ -311,7 +353,37 @@ function buildRows(project: Scene, tracks: TimelineTrack[]): TimelineTree {
       used.add(t.target);
     } else if (parts[0] === 'airflow') {
       const g = ensureGroup('airflow', 'Airflow');
-      g.items.push({ label: parts.slice(1).join('.') || t.target, track: t });
+      const prop = parts[1] ?? t.target;
+      const label =
+        prop === 'enabled'
+          ? 'On'
+          : prop === 'flowColor'
+            ? 'Flow color'
+            : prop === 'accentColor'
+              ? 'Accent color'
+              : prop === 'speed'
+                ? 'Speed'
+                : prop === 'brightness'
+                  ? 'Brightness'
+                  : prop === 'opacity'
+                    ? 'Opacity'
+                    : prop === 'width'
+                      ? 'Width'
+                      : prop;
+      g.items.push({ label, track: t });
+      used.add(t.target);
+    } else if (parts[0] === 'motion') {
+      const g = ensureGroup('motion', 'Speed');
+      const prop = parts[1] ?? t.target;
+      const label =
+        prop === 'enabled'
+          ? 'On'
+          : prop === 'wheelSpeed'
+            ? 'Wheel speed'
+            : prop === 'shake'
+              ? 'Camera shake'
+              : prop;
+      g.items.push({ label, track: t });
       used.add(t.target);
     } else if (parts[0] === 'lighting') {
       const g = ensureGroup('lighting', 'Lighting');
@@ -461,6 +533,7 @@ export function mountTimelineUi(
     const v = parseFloat(durInput.value) || 8;
     api.timeline.setDuration(v);
     api.getScene().duration = v;
+    syncMasterAfterSceneDuration(api);
     refresh();
     api.onChange();
   });
@@ -1433,6 +1506,7 @@ export function mountTimelineUi(
             if (Math.abs(draftDur - project.duration) > 1e-4) {
               api.timeline.setDuration(draftDur);
               project.duration = draftDur;
+              syncMasterAfterSceneDuration(api);
               api.onChange();
             } else {
               refresh();

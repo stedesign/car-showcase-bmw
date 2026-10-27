@@ -84,6 +84,8 @@ function cam(name: string, start: Pose): CameraClip {
     position: { ...start.position },
     target: { ...start.target },
     fov: start.fov,
+    pathId: null,
+    pathProgress: 0,
   };
 }
 
@@ -252,6 +254,7 @@ function sceneOf(
     look,
     cameras: [camera],
     planes: [],
+    paths: [],
     timeline: { tracks },
   };
 }

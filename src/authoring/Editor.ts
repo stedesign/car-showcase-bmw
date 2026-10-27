@@ -11,11 +11,14 @@ import {
   deleteAllScenes,
   deleteScene,
   duplicateScene,
+  reorderScene,
   FREE_CAMERA_ID,
   getActiveScene,
   getSceneById,
   loadProjectFromStorage,
   masterDuration,
+  mergeScenesIntoProject,
+  clampPathProgress,
   parseProject,
   projectFromLegacySettings,
   saveProjectToStorage,
@@ -30,20 +33,24 @@ import {
 } from './project';
 import { STORYBOARD_LEGACY_NAMES, STORYBOARD_NAME } from './storyboard';
 import type { CarLightsParams } from '../viewer/carLights';
+import { logoMarkIndex } from '../viewer/wrtLogo';
 import { createCamerasHandle, type CamerasHandle } from './cameras';
 import { createPlanesHandle, type PlanesHandle } from './planes';
+import { createPathsHandle, type PathsHandle } from './paths';
 import { createTimelineEngine, poseFromCameraClip, type TimelineEngine } from './timeline';
 import { createProjectHistory } from './history';
 import { createMasterClock, resolveMasterTime } from './masterPlayback';
 import { kickProjectFonts } from './fonts';
 import { createMasterTextOverlay } from './masterTextOverlay';
 import { mountEditorShell, type EditorShell } from './ui/shell';
+import { showImportProjectDialog } from './ui/importDialog';
 
 export type EditorHandle = {
   project: Project;
   timeline: TimelineEngine;
   cameras: CamerasHandle;
   planes: PlanesHandle;
+  paths: PathsHandle;
   selection: Selection;
   select: (kind: Selection['kind'], id: string | null) => void;
   refreshUi: () => void;
@@ -123,10 +130,17 @@ export async function createEditor(
     viewer.canvas,
     viewer.controls,
   );
+  const paths = createPathsHandle(
+    viewer.scene,
+    viewer.camera,
+    viewer.canvas,
+    viewer.controls,
+  );
 
   planes.setFromProject(scene.planes);
+  paths.setFromProject(scene.paths ?? []);
   viewer.setCarVisible(scene.carVisible !== false);
-  viewer.setShadowExcludes([planes.group, cameras.group]);
+  viewer.setShadowExcludes([planes.group, cameras.group, paths.group]);
   cameras.excludeFromReflector(viewer.ground.reflector);
   // Start in free camera — don't jump into a dedicated cam on boot
   cameras.enterFree();
@@ -146,10 +160,37 @@ export async function createEditor(
   let applyingHistory = false;
   /** Scene id currently loaded into runtime (cameras / look / timeline). */
   let loadedSceneId = scene.id;
+  /** In-flight scene switch id (null when runtime matches loadedSceneId). */
+  let pendingSceneId: string | null = null;
+  let sceneLoadSerial = 0;
   /** When true, master clock drives playback instead of scene timeline. */
   let masterDriving = false;
 
   const history = createProjectHistory(project);
+
+  const syncCameraPositionFromPath = (cameraId: string) => {
+    const clip = cameras.get(cameraId);
+    if (!clip?.pathId) return false;
+    const point = paths.getPointAt(clip.pathId, clampPathProgress(clip.pathProgress));
+    if (!point) {
+      clip.pathId = null;
+      return false;
+    }
+    clip.position = { ...point };
+    return true;
+  };
+
+  const syncAttachedCameras = (pathId?: string) => {
+    for (const clip of cameras.clips) {
+      if (!clip.pathId) continue;
+      if (pathId && clip.pathId !== pathId) continue;
+      if (!syncCameraPositionFromPath(clip.id)) continue;
+      if (clip.id === cameras.playCameraId || cameras.throughCameraId === clip.id) {
+        cameras.applyPose(poseFromCameraClip(clip));
+      }
+    }
+    cameras.refreshHelpers();
+  };
 
   const syncSceneFromRuntime = () => {
     const s = getActiveScene(project);
@@ -157,6 +198,7 @@ export async function createEditor(
     s.playCameraId = cameras.playCameraId;
     s.carVisible = viewer.carVisible;
     s.planes = planes.serialize();
+    s.paths = paths.serialize();
     s.look = captureProjectLook(viewer);
     s.duration = timeline.duration;
     scene = s;
@@ -198,6 +240,8 @@ export async function createEditor(
     viewer.customLights.setTransformEnabled(false);
     planes.select(null);
     planes.setTransformEnabled(false);
+    paths.select(null);
+    paths.setTransformEnabled(false);
   };
 
   const select = (kind: Selection['kind'], id: string | null) => {
@@ -233,10 +277,17 @@ export async function createEditor(
       if (cameras.viewMode === 'through') cameras.enterFree();
       planes.setTransformEnabled(true);
       planes.select(id);
+    } else if (kind === 'path') {
+      cameras.select(null);
+      if (cameras.viewMode === 'through') cameras.enterFree();
+      paths.setTransformEnabled(true);
+      paths.select(id);
     } else if (
       kind === 'car' ||
       kind === 'carLights' ||
       kind === 'roofStrobe' ||
+      kind === 'airflow' ||
+      kind === 'motion' ||
       kind === 'lighting' ||
       kind === 'dotGrid'
     ) {
@@ -255,10 +306,13 @@ export async function createEditor(
     const stillExists =
       (kind === 'camera' && !!cameras.get(id)) ||
       (kind === 'plane' && planes.entries.some((e) => e.id === id)) ||
+      (kind === 'path' && paths.entries.some((e) => e.id === id)) ||
       (kind === 'light' && viewer.customLights.entries.some((e) => e.id === id)) ||
       kind === 'car' ||
       kind === 'carLights' ||
       kind === 'roofStrobe' ||
+      kind === 'airflow' ||
+      kind === 'motion' ||
       kind === 'lighting' ||
       kind === 'dotGrid' ||
       kind === 'freeCamera';
@@ -266,18 +320,45 @@ export async function createEditor(
     else select(null, null);
   };
 
+  const isMasterPlaying = () =>
+    masterDriving || (isMasterMode() && master.state === 'playing');
+
   const loadSceneRuntime = async (next: Scene, seekT?: number) => {
-    scene = next;
-    project.activeSceneId = next.id;
-    loadedSceneId = next.id;
-    await applySettings(viewer, next.look);
-    applyCarVisible(next.carVisible !== false);
-    cameras.setClips(next.cameras, next.playCameraId);
-    planes.setFromProject(next.planes);
-    timeline.bindScene(next);
-    timeline.seek(seekT ?? 0);
-    if (isMasterMode()) followMasterShot();
-    else cameras.releaseShot();
+    const serial = ++sceneLoadSerial;
+    pendingSceneId = next.id;
+    // Hold the last good frame across async look/env apply so the cut never
+    // paints rest-pose / half-applied settings for a tick.
+    viewer.setHoldFrame(true);
+    try {
+      await applySettings(viewer, next.look);
+      if (serial !== sceneLoadSerial) return;
+
+      applyCarVisible(next.carVisible !== false);
+      cameras.setClips(next.cameras, next.playCameraId);
+      planes.setFromProject(next.planes);
+      paths.setFromProject(next.paths ?? []);
+      syncAttachedCameras();
+      timeline.bindScene(next);
+
+      // Prefer the live master playhead if the clock advanced during the await.
+      let t = seekT ?? 0;
+      if (isMasterMode()) {
+        const live = resolveMasterTime(project, master.time);
+        if (live && live.scene.id === next.id) t = live.localT;
+      }
+      timeline.seek(t);
+      scene = next;
+      project.activeSceneId = next.id;
+      loadedSceneId = next.id;
+      if (isMasterMode()) followMasterShot();
+      else cameras.releaseShot();
+    } finally {
+      // Only the latest load may release the hold / clear pending.
+      if (serial === sceneLoadSerial) {
+        pendingSceneId = null;
+        viewer.setHoldFrame(false);
+      }
+    }
   };
 
   const switchToScene = async (sceneId: string) => {
@@ -349,13 +430,28 @@ export async function createEditor(
       if (parts[2] === 'pose' && isPose(value)) {
         const clip = cameras.get(parts[1]);
         if (clip) {
-          clip.position = { ...value.position };
           clip.target = { ...value.target };
           clip.fov = value.fov;
+          if (clip.pathId) {
+            syncCameraPositionFromPath(clip.id);
+          } else {
+            clip.position = { ...value.position };
+          }
         }
         cameras.refreshHelpers();
+        if (parts[1] === cameras.playCameraId && clip) {
+          cameras.applyPose(poseFromCameraClip(clip));
+        }
+        return;
+      }
+      if (parts[2] === 'pathProgress' && typeof value === 'number') {
+        const clip = cameras.get(parts[1]);
+        if (!clip) return;
+        clip.pathProgress = clampPathProgress(value);
+        syncCameraPositionFromPath(clip.id);
+        cameras.refreshHelpers();
         if (parts[1] === cameras.playCameraId) {
-          cameras.applyPose(value);
+          cameras.applyPose(poseFromCameraClip(clip));
         }
         return;
       }
@@ -439,7 +535,30 @@ export async function createEditor(
       if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string') {
         (viewer.airflow.params as unknown as Record<string, number | boolean | string>)[key] =
           value;
-        viewer.airflow.applyParams();
+        const enabledTrack = getActiveScene(project).timeline.tracks.find(
+          (tr) => tr.target === 'airflow.enabled',
+        );
+        if (enabledTrack?.keyframes.length) {
+          viewer.airflow.syncTimeline(
+            timeline.time,
+            enabledTrack.keyframes.map((k) => ({
+              t: k.t,
+              value: !!k.value,
+            })),
+          );
+        } else {
+          viewer.airflow.applyParams();
+        }
+      }
+      return;
+    }
+
+    if (root === 'motion' && parts[1]) {
+      const key = parts[1] as keyof typeof viewer.motion.params;
+      if (!(key in viewer.motion.params)) return;
+      if (typeof value === 'number' || typeof value === 'boolean') {
+        (viewer.motion.params as unknown as Record<string, number | boolean>)[key] = value;
+        viewer.motion.applyParams();
       }
       return;
     }
@@ -477,7 +596,7 @@ export async function createEditor(
     }
 
     if ((root === 'logo' || root === 'dotGrid') && parts[1] === 'mark' && typeof value === 'number') {
-      const mark = value >= 0.5 ? 1 : 0;
+      const mark = logoMarkIndex(value);
       viewer.logo.params.mark = mark;
       viewer.dotGrid.params.mark = mark;
       viewer.logo.applyParams();
@@ -514,10 +633,12 @@ export async function createEditor(
   const setPlaybackUi = (playing: boolean) => {
     const lockHelpers = playing || previewing || recordingFromTimeline;
     cameras.setPlaybackLocked(lockHelpers);
+    paths.setPlaybackLocked(lockHelpers);
     if (lockHelpers) {
       clearGizmos();
       viewer.customLights.setTransformEnabled(false);
       planes.setTransformEnabled(false);
+      paths.setTransformEnabled(false);
     }
   };
 
@@ -562,7 +683,12 @@ export async function createEditor(
   master.setOnResolve((r) => {
     if (!masterDriving && !isMasterMode()) return;
     if (r.scene.id !== loadedSceneId) {
-      void loadSceneRuntime(r.scene, r.localT).then(() => shell?.refresh());
+      void loadSceneRuntime(r.scene, r.localT).then(() => {
+        // Full shell.refresh() rebuilds DOM + notifyResize (clears the GL
+        // buffer). During play that reads as a one-frame flash — playhead only.
+        if (isMasterPlaying()) shell?.updatePlayhead();
+        else shell?.refresh();
+      });
     } else {
       timeline.seek(r.localT);
     }
@@ -571,10 +697,16 @@ export async function createEditor(
   master.setOnTime(() => {
     if (masterDriving || isMasterMode()) {
       const resolved = resolveMasterTime(project, master.time);
-      if (resolved && resolved.scene.id === loadedSceneId) {
+      // Skip seeks while a cut is loading — runtime still belongs to the
+      // previous scene until loadSceneRuntime commits loadedSceneId.
+      if (
+        resolved &&
+        resolved.scene.id === loadedSceneId &&
+        !pendingSceneId
+      ) {
         timeline.seek(resolved.localT);
       }
-      followMasterShot();
+      if (!pendingSceneId) followMasterShot();
       shell?.updatePlayhead();
     }
   });
@@ -697,9 +829,24 @@ export async function createEditor(
     }
     const t = timeline.time;
     if (selection.kind === 'camera') {
+      const clip = cameras.get(selection.id);
       const pose = snapshotCameraPose(selection.id);
-      if (!pose) return;
-      timeline.setKeyframe(`camera.${selection.id}.pose`, t, pose);
+      if (!pose || !clip) return;
+      if (clip.pathId) {
+        syncCameraPositionFromPath(clip.id);
+        timeline.setKeyframe(
+          `camera.${selection.id}.pathProgress`,
+          t,
+          clampPathProgress(clip.pathProgress),
+        );
+        timeline.setKeyframe(
+          `camera.${selection.id}.pose`,
+          t,
+          poseFromCameraClip(clip),
+        );
+      } else {
+        timeline.setKeyframe(`camera.${selection.id}.pose`, t, pose);
+      }
     } else if (selection.kind === 'plane') {
       const entry = planes.entries.find((e) => e.id === selection.id);
       if (!entry) return;
@@ -757,6 +904,20 @@ export async function createEditor(
       timeline.setKeyframe('roofStrobe.thickness', t, rs.thickness);
       timeline.setKeyframe('roofStrobe.yOffset', t, rs.yOffset);
       timeline.setKeyframe('roofStrobe.zOffset', t, rs.zOffset);
+    } else if (selection.kind === 'airflow') {
+      const af = viewer.airflow.params;
+      timeline.setKeyframe('airflow.enabled', t, af.enabled, 'linear');
+      timeline.setKeyframe('airflow.speed', t, af.speed);
+      timeline.setKeyframe('airflow.brightness', t, af.brightness);
+      timeline.setKeyframe('airflow.opacity', t, af.opacity);
+      timeline.setKeyframe('airflow.width', t, af.width);
+      timeline.setKeyframe('airflow.flowColor', t, af.flowColor, 'linear');
+      timeline.setKeyframe('airflow.accentColor', t, af.accentColor, 'linear');
+    } else if (selection.kind === 'motion') {
+      const mo = viewer.motion.params;
+      timeline.setKeyframe('motion.enabled', t, mo.enabled, 'linear');
+      timeline.setKeyframe('motion.wheelSpeed', t, mo.wheelSpeed);
+      timeline.setKeyframe('motion.shake', t, mo.shake);
     } else if (selection.kind === 'lighting') {
       const L = viewer.state.lighting;
       timeline.setKeyframe('lighting.environment', t, L.environment, 'linear');
@@ -814,15 +975,56 @@ export async function createEditor(
       setStatus('Invalid project file');
       return;
     }
+
+    const choice = await showImportProjectDialog({
+      projectName: parsed.name || file.name.replace(/\.json$/i, ''),
+      scenes: parsed.scenes.map((s) => ({
+        id: s.id,
+        name: s.name,
+        duration: s.duration,
+      })),
+    });
+    if (choice.mode === 'cancel') {
+      setStatus('Import cancelled');
+      return;
+    }
+
+    if (choice.mode === 'replace') {
+      clearHistoryTimer();
+      project = parsed;
+      kickProjectFonts(project.fonts);
+      master.bindProject(project);
+      scene = getActiveScene(project);
+      await loadSceneRuntime(scene);
+      history.reset(project);
+      writeStorage();
+      select(null, null);
+      setStatus(`Loaded ${project.name}`);
+      shell?.refresh();
+      return;
+    }
+
+    const selected = parsed.scenes.filter((s) => choice.sceneIds.includes(s.id));
+    if (!selected.length) {
+      setStatus('No scenes selected');
+      return;
+    }
+
     clearHistoryTimer();
-    project = parsed;
+    syncSceneFromRuntime();
+    history.push(project);
+    // parseProject advanced the id counter from the import; re-anchor to ours.
+    syncIdCounterFromProject(project);
+    const added = mergeScenesIntoProject(project, selected, {
+      addToMaster: choice.addToMaster,
+    });
+    const focus = added[added.length - 1];
     master.bindProject(project);
-    scene = getActiveScene(project);
-    await loadSceneRuntime(scene);
-    history.reset(project);
-    writeStorage();
+    await loadSceneRuntime(focus);
+    commitHistory();
     select(null, null);
-    setStatus(`Loaded ${project.name}`);
+    const label = added.length === 1 ? `Merged “${focus.name}”` : `Merged ${added.length} scenes`;
+    setStatus(choice.addToMaster ? `${label} · added to master` : label);
     shell?.refresh();
   };
 
@@ -1117,6 +1319,15 @@ export async function createEditor(
     shell?.refresh();
   };
 
+  const handleReorderScenes = (sceneId: string, toIndex: number) => {
+    const s = getSceneById(project, sceneId);
+    if (!s) return;
+    if (!reorderScene(project, sceneId, toIndex)) return;
+    commitHistory();
+    setStatus(`Moved ${s.name}`);
+    shell?.refresh();
+  };
+
   const isTypingTarget = (el: EventTarget | null) => {
     if (!(el instanceof HTMLElement)) return false;
     const tag = el.tagName;
@@ -1162,7 +1373,14 @@ export async function createEditor(
   };
   cameras.setOnTransformCommit(onTransformCommit);
   planes.setOnTransformCommit(onTransformCommit);
+  paths.setOnTransformCommit(onTransformCommit);
+  paths.setOnPointsChange((pathId) => {
+    syncAttachedCameras(pathId);
+  });
   viewer.customLights.setOnTransformCommit(onTransformCommit);
+
+  // Place attached cameras on their paths after initial load.
+  syncAttachedCameras();
 
   shell = mountEditorShell({
     viewer,
@@ -1172,6 +1390,7 @@ export async function createEditor(
     select,
     cameras,
     planes,
+    paths,
     timeline,
     getMasterTime: () => master.time,
     getMasterDuration: () => masterDuration(project),
@@ -1199,6 +1418,7 @@ export async function createEditor(
     onDeleteScene: handleDeleteScene,
     onDeleteAllScenes: handleDeleteAllScenes,
     onRenameScene: handleRenameScene,
+    onReorderScenes: handleReorderScenes,
     setStatus,
     isRecording: () => recorder.isRecording || recordingFromTimeline,
     isPreviewing: () => previewing,
@@ -1215,7 +1435,7 @@ export async function createEditor(
     masterText.render(renderer);
   });
 
-  viewer.setExternalTick((dt) => {
+  viewer.setExternalTick((dt, elapsed) => {
     // A hitch (scene load, preview resize) must not skip the title intro.
     const step = Math.min(Math.max(dt, 0), 0.05);
     if (masterDriving || (isMasterMode() && master.state === 'playing')) {
@@ -1231,6 +1451,8 @@ export async function createEditor(
     );
     cameras.update();
     planes.update();
+    paths.update();
+    cameras.applyShake(viewer.motion.effectiveShake(), elapsed);
   });
 
   requestAnimationFrame(() => viewer.notifyResize());
@@ -1242,6 +1464,7 @@ export async function createEditor(
     timeline,
     cameras,
     planes,
+    paths,
     get selection() {
       return selection;
     },
@@ -1252,12 +1475,15 @@ export async function createEditor(
       window.removeEventListener('keydown', onKeyDown);
       cameras.setOnTransformCommit(null);
       planes.setOnTransformCommit(null);
+      paths.setOnTransformCommit(null);
+      paths.setOnPointsChange(null);
       viewer.customLights.setOnTransformCommit(null);
       viewer.setExternalTick(null);
       viewer.setScreenOverlay(null);
       masterText.dispose();
       cameras.dispose();
       planes.dispose();
+      paths.dispose();
       shell.dispose();
     },
   };

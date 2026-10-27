@@ -1,7 +1,10 @@
 import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
 import type { PlanesHandle } from '../planes';
+import type { PathsHandle } from '../paths';
 import {
+  AIRFLOW_ID,
+  MOTION_ID,
   CAR_ID,
   CAR_LIGHTS_ID,
   DOT_GRID_ID,
@@ -21,6 +24,7 @@ export type HierarchyApi = {
   select: (kind: Selection['kind'], id: string | null) => void;
   cameras: CamerasHandle;
   planes: PlanesHandle;
+  paths: PathsHandle;
   onChange: () => void;
   onSelectScene?: (sceneId: string) => void;
   onAddScene?: () => void;
@@ -28,15 +32,25 @@ export type HierarchyApi = {
   onDeleteScene?: (sceneId: string) => void;
   onDeleteAllScenes?: () => void;
   onRenameScene?: (sceneId: string, name: string) => void;
+  onReorderScenes?: (sceneId: string, toIndex: number) => void;
   /** Delete timeline keyframes and dedicated cameras. Free camera stays. */
   onClearScene?: () => void;
 };
 
 const SIDEBAR_COLLAPSE_KEY = 'wrt-director-sidebar-collapsed';
+const SIDEBAR_SPLIT_KEY = 'wrt-director-sidebar-split';
+const SIDEBAR_PANE_KEY = 'wrt-director-sidebar-pane';
 const TWIST_ICON =
   '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">' +
   '<path d="M2.2 3.5 L5 6.5 L7.8 3.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' +
   '</svg>';
+const SPLIT_ICON =
+  '<svg width="12" height="14" viewBox="0 0 12 14" aria-hidden="true">' +
+  '<path d="M6 1.5 L9.2 5 H2.8 Z" fill="currentColor"/>' +
+  '<path d="M6 12.5 L2.8 9 H9.2 Z" fill="currentColor"/>' +
+  '</svg>';
+
+type SidebarPane = 'none' | 'scenes' | 'rest';
 
 function loadCollapsedSections(): Set<string> {
   try {
@@ -58,7 +72,45 @@ function saveCollapsedSections(ids: Set<string>) {
   }
 }
 
+function loadSplitPct(): number {
+  try {
+    const n = Number.parseFloat(localStorage.getItem(SIDEBAR_SPLIT_KEY) ?? '');
+    if (Number.isFinite(n) && n >= 18 && n <= 82) return n;
+  } catch {
+    /* ignore */
+  }
+  return 42;
+}
+
+function saveSplitPct(pct: number) {
+  try {
+    localStorage.setItem(SIDEBAR_SPLIT_KEY, String(Math.round(pct * 10) / 10));
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadCollapsedPane(): SidebarPane {
+  try {
+    const v = localStorage.getItem(SIDEBAR_PANE_KEY);
+    if (v === 'scenes' || v === 'rest' || v === 'none') return v;
+  } catch {
+    /* ignore */
+  }
+  return 'none';
+}
+
+function saveCollapsedPane(pane: SidebarPane) {
+  try {
+    localStorage.setItem(SIDEBAR_PANE_KEY, pane);
+  } catch {
+    /* ignore */
+  }
+}
+
 const collapsedSections = loadCollapsedSections();
+let scenesSplitPct = loadSplitPct();
+let collapsedPane: SidebarPane = loadCollapsedPane();
 
 function applySectionFold(head: HTMLElement, body: HTMLElement, id: string, label: string) {
   const folded = collapsedSections.has(id);
@@ -104,6 +156,125 @@ function applySectionFold(head: HTMLElement, body: HTMLElement, id: string, labe
     const target = event.target as HTMLElement;
     if (target.closest('.ed-twist, .ed-btn')) return;
     toggle(event);
+  });
+}
+
+const DRAG_THRESHOLD_PX = 5;
+
+function bindSceneReorder(body: HTMLElement, api: HierarchyApi) {
+  let dragId: string | null = null;
+  let fromIndex = -1;
+  /** Gap index 0..n (before first … after last). */
+  let slot = -1;
+  let startY = 0;
+  let active = false;
+  let pointerId = -1;
+
+  const rows = () =>
+    [...body.querySelectorAll<HTMLElement>('.ed-tree-item[data-scene-id]')];
+
+  const clearIndicators = () => {
+    for (const row of rows()) {
+      row.classList.remove('ed-drop-before', 'ed-drop-after', 'ed-dragging');
+    }
+  };
+
+  /** Gap under the pointer: 0 = before first row, n = after last. */
+  const slotFromY = (clientY: number) => {
+    const list = rows();
+    for (let i = 0; i < list.length; i++) {
+      const rect = list[i].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) return i;
+    }
+    return list.length;
+  };
+
+  const slotToIndex = (gap: number, from: number) => {
+    let to = gap;
+    if (from < gap) to = gap - 1;
+    return Math.max(0, Math.min(rows().length - 1, to));
+  };
+
+  const paintSlot = (gap: number, excludeId: string, from: number) => {
+    clearIndicators();
+    const list = rows();
+    const dragRow = list.find((r) => r.dataset.sceneId === excludeId);
+    if (dragRow) dragRow.classList.add('ed-dragging');
+    if (!list.length) return;
+    // Same position — no insert line.
+    if (gap === from || gap === from + 1) return;
+    if (gap <= 0) {
+      list[0].classList.add('ed-drop-before');
+      return;
+    }
+    if (gap >= list.length) {
+      list[list.length - 1].classList.add('ed-drop-after');
+      return;
+    }
+    list[gap].classList.add('ed-drop-before');
+  };
+
+  const swallowNextClick = () => {
+    const sink = (ev: MouseEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      window.removeEventListener('click', sink, true);
+    };
+    window.addEventListener('click', sink, true);
+  };
+
+  const onMove = (e: PointerEvent) => {
+    if (!dragId || e.pointerId !== pointerId) return;
+    if (!active) {
+      if (Math.abs(e.clientY - startY) < DRAG_THRESHOLD_PX) return;
+      active = true;
+      body.classList.add('ed-reordering');
+    }
+    e.preventDefault();
+    slot = slotFromY(e.clientY);
+    paintSlot(slot, dragId, fromIndex);
+  };
+
+  const onUp = (e: PointerEvent) => {
+    if (e.pointerId !== pointerId) return;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+    body.classList.remove('ed-reordering');
+    const id = dragId;
+    const from = fromIndex;
+    const gap = slot;
+    const didDrag = active;
+    clearIndicators();
+    dragId = null;
+    fromIndex = -1;
+    slot = -1;
+    active = false;
+    pointerId = -1;
+    if (!didDrag || !id || from < 0 || gap < 0) return;
+    const to = slotToIndex(gap, from);
+    if (from === to) return;
+    swallowNextClick();
+    api.onReorderScenes?.(id, to);
+  };
+
+  body.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('.ed-btn')) return;
+    const row = target.closest<HTMLElement>('.ed-tree-item[data-scene-id]');
+    if (!row || !body.contains(row)) return;
+    const id = row.dataset.sceneId;
+    if (!id) return;
+    dragId = id;
+    fromIndex = rows().findIndex((r) => r.dataset.sceneId === id);
+    slot = fromIndex;
+    startY = e.clientY;
+    active = false;
+    pointerId = e.pointerId;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   });
 }
 
@@ -209,11 +380,21 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
   scenesHead.append(scenesTitle, scenesBtns);
   const scenesBody = document.createElement('div');
   scenesBody.className = 'ed-section-body';
+  const canReorder = !!api.onReorderScenes && project.scenes.length > 1;
   for (const s of project.scenes) {
     const row = document.createElement('div');
-    row.className = `ed-tree-item${s.id === scene.id ? ' active' : ''}`;
+    row.className = `ed-tree-item${s.id === scene.id ? ' active' : ''}${canReorder ? ' ed-scene-row' : ''}`;
+    row.dataset.sceneId = s.id;
     row.setAttribute('role', 'button');
     row.tabIndex = 0;
+    if (canReorder) row.title = 'Drag to reorder';
+    if (canReorder) {
+      const grip = document.createElement('span');
+      grip.className = 'ed-drag-handle';
+      grip.setAttribute('aria-hidden', 'true');
+      grip.textContent = '⠿';
+      row.append(grip);
+    }
     const tag = document.createElement('span');
     tag.className = 'tag';
     tag.textContent = 'scene';
@@ -251,13 +432,140 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
     }
     scenesBody.append(row);
   }
+  if (canReorder) bindSceneReorder(scenesBody, api);
   applySectionFold(scenesHead, scenesBody, 'scenes', 'Scenes');
   scenes.append(scenesHead, scenesBody);
   host.append(scenes);
 
+  const splitter = document.createElement('div');
+  splitter.className = 'ed-sidebar-split';
+  splitter.title = 'Drag to resize · click to collapse/expand';
+  const splitGrip = document.createElement('button');
+  splitGrip.type = 'button';
+  splitGrip.className = 'ed-sidebar-split-grip';
+  splitGrip.setAttribute('aria-label', 'Resize or collapse sidebar areas');
+  splitGrip.innerHTML = SPLIT_ICON;
+  splitter.append(splitGrip);
+  host.append(splitter);
+
   const rest = document.createElement('div');
   rest.className = 'ed-sidebar-rest';
   host.append(rest);
+
+  const restCollapseBar = document.createElement('button');
+  restCollapseBar.type = 'button';
+  restCollapseBar.className = 'ed-sidebar-rest-bar';
+  restCollapseBar.textContent = 'Layers';
+  restCollapseBar.title = 'Expand layers';
+  restCollapseBar.hidden = collapsedPane !== 'rest';
+  restCollapseBar.addEventListener('click', () => setCollapsedPane('none'));
+  host.append(restCollapseBar);
+
+  const syncSplitChrome = () => {
+    const label =
+      collapsedPane === 'scenes'
+        ? 'Expand scenes'
+        : collapsedPane === 'rest'
+          ? 'Expand layers'
+          : 'Drag to resize · click to collapse';
+    splitter.title = label;
+    splitGrip.setAttribute('aria-label', label);
+    restCollapseBar.hidden = collapsedPane !== 'rest';
+  };
+
+  const applyPaneLayout = () => {
+    host.classList.toggle('ed-pane-scenes-collapsed', collapsedPane === 'scenes');
+    host.classList.toggle('ed-pane-rest-collapsed', collapsedPane === 'rest');
+    scenes.style.flex = '';
+    rest.style.flex = '';
+    if (collapsedPane === 'none') {
+      scenes.style.flex = `${scenesSplitPct} 0 0`;
+      rest.style.flex = `${100 - scenesSplitPct} 1 0`;
+    }
+    syncSplitChrome();
+  };
+
+  const setCollapsedPane = (pane: SidebarPane) => {
+    collapsedPane = pane;
+    saveCollapsedPane(pane);
+    applyPaneLayout();
+  };
+
+  applyPaneLayout();
+
+  const COLLAPSE_EDGE_PX = 56;
+  const bindSplitter = () => {
+    let pointerId = -1;
+    let startY = 0;
+    let startScenesH = 0;
+    let hostH = 0;
+    let dragged = false;
+
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      const dy = e.clientY - startY;
+      if (!dragged && Math.abs(dy) < DRAG_THRESHOLD_PX) return;
+      dragged = true;
+      e.preventDefault();
+      splitter.classList.add('dragging');
+      document.body.classList.add('ed-sidebar-resizing');
+
+      const nextH = Math.max(0, Math.min(hostH, startScenesH + dy));
+      if (nextH <= COLLAPSE_EDGE_PX) {
+        setCollapsedPane('scenes');
+        return;
+      }
+      if (hostH - nextH <= COLLAPSE_EDGE_PX) {
+        setCollapsedPane('rest');
+        return;
+      }
+      if (collapsedPane !== 'none') setCollapsedPane('none');
+      scenesSplitPct = (nextH / hostH) * 100;
+      applyPaneLayout();
+    };
+
+    const onUp = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      splitter.classList.remove('dragging');
+      document.body.classList.remove('ed-sidebar-resizing');
+      const wasDrag = dragged;
+      pointerId = -1;
+      dragged = false;
+      if (wasDrag) {
+        if (collapsedPane === 'none') saveSplitPct(scenesSplitPct);
+        return;
+      }
+      // Click cycles: both → collapse scenes → collapse layers → both
+      if (collapsedPane === 'none') setCollapsedPane('scenes');
+      else if (collapsedPane === 'scenes') setCollapsedPane('rest');
+      else setCollapsedPane('none');
+    };
+
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      pointerId = e.pointerId;
+      startY = e.clientY;
+      hostH = Math.max(1, host.getBoundingClientRect().height);
+      const prior = collapsedPane;
+      // Seed drag height so pulling out of a collapsed pane expands smoothly.
+      if (prior === 'scenes') startScenesH = COLLAPSE_EDGE_PX;
+      else if (prior === 'rest') startScenesH = hostH - COLLAPSE_EDGE_PX;
+      else startScenesH = scenes.getBoundingClientRect().height;
+      dragged = false;
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    };
+
+    splitter.addEventListener('pointerdown', onDown);
+    splitGrip.addEventListener('pointerdown', onDown);
+  };
+  bindSplitter();
 
   rest.append(
     section(
@@ -386,6 +694,18 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
           active: sel.kind === 'roofStrobe' && sel.id === ROOF_STROBE_ID,
         },
         {
+          id: AIRFLOW_ID,
+          label: 'Airflow',
+          kind: 'airflow' as const,
+          active: sel.kind === 'airflow' && sel.id === AIRFLOW_ID,
+        },
+        {
+          id: MOTION_ID,
+          label: 'Speed',
+          kind: 'motion' as const,
+          active: sel.kind === 'motion' && sel.id === MOTION_ID,
+        },
+        {
           id: DOT_GRID_ID,
           label: 'Dot Grid WRT',
           kind: 'dotGrid' as const,
@@ -421,6 +741,30 @@ export function renderHierarchy(host: HTMLElement, api: HierarchyApi): void {
         label: e.params.name,
         kind: 'plane' as const,
         active: sel.kind === 'plane' && sel.id === e.id,
+      })),
+      api,
+    ),
+  );
+
+  rest.append(
+    section(
+      'Paths',
+      [
+        {
+          label: '+',
+          onClick: () => {
+            const path = api.paths.add();
+            scene.paths = api.paths.serialize();
+            api.select('path', path.id);
+            api.onChange();
+          },
+        },
+      ],
+      api.paths.entries.map((e) => ({
+        id: e.id,
+        label: e.params.name,
+        kind: 'path' as const,
+        active: sel.kind === 'path' && sel.id === e.id,
       })),
       api,
     ),

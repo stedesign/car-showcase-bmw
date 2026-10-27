@@ -31,6 +31,11 @@ export const BUILTIN_FONTS = [
     label: 'IBM Plex Sans',
     stack: '"IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif',
   },
+  {
+    id: 'inter',
+    label: 'Inter',
+    stack: 'Inter, "Helvetica Neue", Helvetica, Arial, sans-serif',
+  },
   { id: 'arial', label: 'Arial', stack: 'Arial, Helvetica, sans-serif' },
   {
     id: 'arial-black',
@@ -89,7 +94,7 @@ export function storedFontSource(id: string): string {
   return sources.get(id) ?? '';
 }
 
-/** Load any uploaded faces, and warm IBM Plex so canvas metrics match the menu. */
+/** Load any uploaded faces, and warm Google faces so canvas metrics match the menu. */
 export function kickProjectFonts(fonts: readonly ProjectFont[] | undefined): void {
   const list = fonts ?? [];
   syncFontRegistry(list);
@@ -102,7 +107,10 @@ export function kickProjectFonts(fonts: readonly ProjectFont[] | undefined): voi
   }));
   loadChain = loadChain.then(async () => {
     await Promise.all(pending.map((font) => installFont(font).catch(() => undefined)));
-    await document.fonts.load('700 64px "IBM Plex Sans"').catch(() => undefined);
+    await Promise.all([
+      document.fonts.load('700 64px "IBM Plex Sans"').catch(() => undefined),
+      document.fonts.load('700 64px Inter').catch(() => undefined),
+    ]);
   });
 }
 

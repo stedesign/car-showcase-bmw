@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="140" viewBox="0 0 1600 140" fill="none">
+  <!--
+    Horizontal lockup for the dotted-wall marquee.
+    Extra trailing space (~35% of the strip) so a U-scroll can loop cleanly.
+    Letterforms are solid white on transparent  the wall paints its own colors.
+  -->
+  <text
+    x="36"
+    y="108"
+    font-family="Arial Black, Impact, 'Helvetica Neue', Helvetica, sans-serif"
+    font-size="112"
+    font-weight="900"
+    fill="#ffffff"
+    letter-spacing="-5"
+  >WE ARE A TEAM</text>
+</svg>

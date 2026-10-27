@@ -48,6 +48,11 @@ export type CamerasHandle = {
   applyClip: (id: string) => void;
   applyPose: (pose: CameraPoseValue) => void;
   /**
+   * Transient vibration on top of the last clean pose. Does not write clips.
+   * Skipped in free-orbit edit so free-cam bookmarks stay clean.
+   */
+  applyShake: (amount: number, elapsed: number) => void;
+  /**
    * Orbit the viewport (free / general camera) onto a world axis while
    * keeping the current look-at target and distance. Smoothly animated.
    */
@@ -343,13 +348,7 @@ export function createCamerasHandle(
   const find = (id: string) => clips.find((c) => c.id === id);
   const findEntry = (id: string) => entries.find((e) => e.id === id);
 
-  const applyPoseToViewport = (pose: CameraPoseValue) => {
-    viewportCamera.position.set(pose.position.x, pose.position.y, pose.position.z);
-    controls.target.set(pose.target.x, pose.target.y, pose.target.z);
-    viewportCamera.fov = pose.fov;
-    viewportCamera.updateProjectionMatrix();
-    controls.update();
-  };
+  let shakeWasActive = false;
 
   const readViewportPose = (): CameraPoseValue => ({
     position: vec3(
@@ -360,6 +359,21 @@ export function createCamerasHandle(
     target: vec3(controls.target.x, controls.target.y, controls.target.z),
     fov: viewportCamera.fov,
   });
+
+  let lastCleanPose: CameraPoseValue = readViewportPose();
+
+  const applyPoseToViewport = (pose: CameraPoseValue) => {
+    lastCleanPose = {
+      position: cloneVec3(pose.position),
+      target: cloneVec3(pose.target),
+      fov: pose.fov,
+    };
+    viewportCamera.position.set(pose.position.x, pose.position.y, pose.position.z);
+    controls.target.set(pose.target.x, pose.target.y, pose.target.z);
+    viewportCamera.fov = pose.fov;
+    viewportCamera.updateProjectionMatrix();
+    controls.update();
+  };
 
   const tintIcon = (icon: THREE.Group, color: number) => {
     icon.traverse((obj) => {
@@ -430,8 +444,15 @@ export function createCamerasHandle(
   transform.addEventListener('objectChange', () => {
     const entry = selectedId ? findEntry(selectedId) : null;
     if (!entry) return;
-    if (gizmoTarget === 'aim') syncParamsFromAim(entry);
-    else syncParamsFromBody(entry);
+    // Path-attached cameras keep eye on the curve — only aim is editable via gizmo.
+    if (entry.params.pathId) {
+      if (gizmoTarget === 'aim') syncParamsFromAim(entry);
+      else syncHelperFromParams(entry);
+    } else if (gizmoTarget === 'aim') {
+      syncParamsFromAim(entry);
+    } else {
+      syncParamsFromBody(entry);
+    }
 
     // Live update viewport when looking through this camera
     if (viewMode === 'through' && throughCameraId === entry.id) {
@@ -447,8 +468,10 @@ export function createCamerasHandle(
       transformHelper.visible = false;
       return;
     }
-    transform.setMode(gizmoTarget === 'aim' ? 'translate' : transformMode);
-    transform.attach(gizmoTarget === 'aim' ? entry.aim : entry.body);
+    // On a path, only the aim sphere is transformable.
+    const useAim = gizmoTarget === 'aim' || !!entry.params.pathId;
+    transform.setMode(useAim ? 'translate' : transformMode);
+    transform.attach(useAim ? entry.aim : entry.body);
     transform.enabled = true;
     transformHelper.visible = true;
   };
@@ -460,7 +483,10 @@ export function createCamerasHandle(
     const entry = findEntry(throughCameraId);
     if (!entry) return;
     const pose = readViewportPose();
-    entry.params.position = cloneVec3(pose.position);
+    // Path rides keep eye position; orbit may still reframe the aim + fov.
+    if (!entry.params.pathId) {
+      entry.params.position = cloneVec3(pose.position);
+    }
     entry.params.target = cloneVec3(pose.target);
     entry.params.fov = pose.fov;
     syncHelperFromParams(entry);
@@ -713,7 +739,16 @@ export function createCamerasHandle(
       return helpersVisible;
     },
     setClips(next, playId) {
-      clips = next.map((c) => structuredClone(c));
+      clips = next.map((c) => {
+        const clip = structuredClone(c);
+        if (typeof clip.pathId !== 'string') clip.pathId = null;
+        if (typeof clip.pathProgress !== 'number' || !Number.isFinite(clip.pathProgress)) {
+          clip.pathProgress = 0;
+        } else {
+          clip.pathProgress = Math.min(1, Math.max(0, clip.pathProgress));
+        }
+        return clip;
+      });
       if (playId && find(playId)) activePlayId = playId;
       else if (!find(activePlayId)) activePlayId = clips[0]?.id ?? '';
       rebuildEntries();
@@ -726,6 +761,9 @@ export function createCamerasHandle(
         position: partial?.position ? cloneVec3(partial.position) : cloneVec3(pose.position),
         target: partial?.target ? cloneVec3(partial.target) : cloneVec3(pose.target),
         fov: partial?.fov ?? pose.fov,
+        pathId: partial?.pathId ?? null,
+        pathProgress:
+          typeof partial?.pathProgress === 'number' ? partial.pathProgress : 0,
       };
       // Offset new camera slightly so it isn't stacked on free view
       if (!partial?.position) {
@@ -795,6 +833,43 @@ export function createCamerasHandle(
     applyPose(pose) {
       cancelAxisSnap();
       applyPoseToViewport(pose);
+    },
+    applyShake(amount, elapsed) {
+      const allow = playbackLocked || viewMode === 'through' || shotHold;
+      if (!allow) {
+        shakeWasActive = false;
+        return;
+      }
+      const amp = Math.max(0, amount);
+      if (amp <= 1e-5) {
+        if (shakeWasActive) {
+          applyPoseToViewport(lastCleanPose);
+          shakeWasActive = false;
+        }
+        return;
+      }
+      shakeWasActive = true;
+      const posAmp = amp * 0.014;
+      const tgtAmp = amp * 0.006;
+      const t = elapsed;
+      const ox =
+        (Math.sin(t * 47.3) + Math.sin(t * 23.1) * 0.55 + Math.sin(t * 91.7) * 0.25) *
+        posAmp;
+      const oy =
+        (Math.sin(t * 39.8 + 1.7) + Math.sin(t * 61.2) * 0.45) * posAmp * 0.7;
+      const oz =
+        (Math.sin(t * 53.4 + 0.9) + Math.sin(t * 29.6) * 0.5) * posAmp;
+      const tx =
+        (Math.sin(t * 41.2 + 2.1) + Math.sin(t * 17.8) * 0.4) * tgtAmp;
+      const ty =
+        (Math.sin(t * 33.7 + 0.4) + Math.sin(t * 55.1) * 0.35) * tgtAmp * 0.6;
+      const p = lastCleanPose.position;
+      const g = lastCleanPose.target;
+      viewportCamera.position.set(p.x + ox, p.y + oy, p.z + oz);
+      controls.target.set(g.x + tx, g.y + ty, g.z);
+      viewportCamera.fov = lastCleanPose.fov;
+      viewportCamera.updateProjectionMatrix();
+      controls.update();
     },
     snapToAxis,
     setPlayCameraId(id) {
@@ -902,8 +977,14 @@ export function createCamerasHandle(
       if (transform.enabled && transform.dragging && selectedId) {
         const entry = findEntry(selectedId);
         if (!entry) return;
-        if (gizmoTarget === 'aim') syncParamsFromAim(entry);
-        else syncParamsFromBody(entry);
+        if (entry.params.pathId) {
+          if (gizmoTarget === 'aim') syncParamsFromAim(entry);
+          else syncHelperFromParams(entry);
+        } else if (gizmoTarget === 'aim') {
+          syncParamsFromAim(entry);
+        } else {
+          syncParamsFromBody(entry);
+        }
         if (viewMode === 'through' && throughCameraId === entry.id) {
           applyPoseToViewport(poseFromCameraClip(entry.params));
         }

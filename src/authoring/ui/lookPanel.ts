@@ -293,60 +293,6 @@ export function renderLookPanel(
   roof.body.append(roofBtnRow);
   host.append(roof.root);
 
-  const air = details('Airflow');
-  air.root.open = true;
-  const af = viewer.airflow.params;
-  const applyAir = () => viewer.airflow.applyParams();
-  air.body.append(
-    field('On', checkInput(af.enabled, note((v) => {
-      af.enabled = v;
-      applyAir();
-    }))),
-    field(
-      'Speed',
-      numInput(af.speed, 0, 3, 0.01, note((v) => {
-        af.speed = v;
-        applyAir();
-      })),
-    ),
-    field(
-      'Brightness',
-      numInput(af.brightness, 0, 8, 0.01, note((v) => {
-        af.brightness = v;
-        applyAir();
-      })),
-    ),
-    field(
-      'Opacity',
-      numInput(af.opacity, 0, 1, 0.01, note((v) => {
-        af.opacity = v;
-        applyAir();
-      })),
-    ),
-    field(
-      'Width',
-      numInput(af.width, 0.25, 4, 0.01, note((v) => {
-        af.width = v;
-        applyAir();
-      })),
-    ),
-    field(
-      'Flow color',
-      colorInput(af.flowColor, note((v) => {
-        af.flowColor = v;
-        applyAir();
-      })),
-    ),
-    field(
-      'Accent color',
-      colorInput(af.accentColor, note((v) => {
-        af.accentColor = v;
-        applyAir();
-      })),
-    ),
-  );
-  host.append(air.root);
-
   const paint = details('Paint');
   paint.body.append(
     field(
@@ -410,6 +356,7 @@ export function renderLookPanel(
         [
           { value: '0', label: 'WRT' },
           { value: '1', label: 'We are a team' },
+          { value: '2', label: 'Team marquee' },
         ],
         note((v) => {
           const mark = logoMarkIndex(Number(v));
@@ -485,6 +432,13 @@ export function renderLookPanel(
       'Wave / speed',
       numInput(dg.wave, 0, 2, 0.01, note((v) => {
         dg.wave = v;
+        applyDg();
+      })),
+    ),
+    field(
+      'Marquee speed',
+      numInput(dg.marqueeSpeed, 0, 0.6, 0.005, note((v) => {
+        dg.marqueeSpeed = v;
         applyDg();
       })),
     ),

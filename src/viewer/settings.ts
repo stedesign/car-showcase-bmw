@@ -14,6 +14,10 @@ import {
 } from './roofStrobe';
 import { DEFAULT_AIRFLOW_PARAMS, type AirflowParams } from './airflow';
 import {
+  DEFAULT_CAR_MOTION_PARAMS,
+  type CarMotionParams,
+} from './carMotion';
+import {
   DEFAULT_CAR_LIGHTS_PARAMS,
   type CarLightsParams,
 } from './carLights';
@@ -41,6 +45,7 @@ export type SavedSettings = {
   softboxes: SoftboxParams;
   roofStrobe: RoofStrobeParams;
   airflow: AirflowParams;
+  motion: CarMotionParams;
   carLights: CarLightsParams;
   ambient: AmbientShadowParams;
   logo: WrtLogoParams;
@@ -68,6 +73,7 @@ export function captureSettings(viewer: Viewer): SavedSettings {
       strobing: false,
     },
     airflow: structuredClone(viewer.airflow.params),
+    motion: structuredClone(viewer.motion.params),
     carLights: structuredClone(viewer.carLights.params),
     ambient: structuredClone(viewer.ambientShadows.params),
     logo: structuredClone(viewer.logo.params),
@@ -91,6 +97,7 @@ export function defaultSettings(): SavedSettings {
     softboxes: structuredClone(DEFAULT_SOFTBOX_PARAMS),
     roofStrobe: structuredClone(DEFAULT_ROOF_STROBE_PARAMS),
     airflow: structuredClone(DEFAULT_AIRFLOW_PARAMS),
+    motion: structuredClone(DEFAULT_CAR_MOTION_PARAMS),
     carLights: structuredClone(DEFAULT_CAR_LIGHTS_PARAMS),
     ambient: structuredClone(DEFAULT_AMBIENT_SHADOW_PARAMS),
     logo: structuredClone(DEFAULT_LOGO_PARAMS),
@@ -122,6 +129,10 @@ export async function applySettings(
     ...DEFAULT_AIRFLOW_PARAMS,
     ...(settings.airflow ?? {}),
   });
+  assignDeep(viewer.motion.params, {
+    ...DEFAULT_CAR_MOTION_PARAMS,
+    ...(settings.motion ?? {}),
+  });
   assignDeep(viewer.carLights.params, settings.carLights);
   assignDeep(viewer.ambientShadows.params, settings.ambient);
   assignDeep(viewer.logo.params, {
@@ -152,17 +163,19 @@ export async function applySettings(
     flashEnabled: false,
   });
 
+  // Resolve environment first, then commit every visible change in one sync
+  // burst so a mid-await render cannot show half-applied look (scene-cut flash).
+  await viewer.applyEnvironment();
   viewer.customLights.replaceAll(settings.customLights);
-
   viewer.applyDisplay();
   viewer.setFloorReflectivity(settings.floorReflectivity);
   viewer.setFloorPuddles(settings.floorPuddles);
-  await viewer.applyEnvironment();
   viewer.applyLighting();
   viewer.carMaterials.applyParams();
   viewer.softboxes.applyParams();
   viewer.roofStrobe.applyParams();
   viewer.airflow.applyParams();
+  viewer.motion.applyParams();
   viewer.carLights.applyParams();
   viewer.ambientShadows.applyParams();
   viewer.logo.applyParams();

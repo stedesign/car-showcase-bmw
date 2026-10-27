@@ -16,7 +16,9 @@ import {
   compactMasterTextLanes,
   getSceneById,
   masterDuration,
+  pruneMasterTextsToDuration,
   normalizeMasterClip,
+  normalizeAllMasterClips,
   type MasterClip,
   TEXT_SIZE_MIN,
   clampMarqueeSpeed,
@@ -35,6 +37,8 @@ const PX_PER_SEC = 48;
 const MIN_CLIP_SEC = 0.05;
 /** Matches `.ed-master-textrow` height. */
 const TEXT_ROW_H = 36;
+/** Pixels of horizontal travel before a clip press becomes a reorder drag. */
+const CLIP_DRAG_THRESHOLD_PX = 6;
 
 export type MasterUiApi = {
   getProject: () => Project;
@@ -375,17 +379,8 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
   deleteTextBtn.type = 'button';
   deleteTextBtn.className = 'ed-btn';
   deleteTextBtn.textContent = 'Delete';
-  deleteTextBtn.addEventListener('click', () => {
-    const clip = selectedText();
-    if (!clip) return;
-    const project = api.getProject();
-    project.master.texts = project.master.texts.filter((t) => t.id !== clip.id);
-    compactMasterTextLanes(project.master.texts);
-    selectedTextId = null;
-    api.onChange();
-    api.setStatus('Removed title');
-    refresh();
-  });
+  deleteTextBtn.title = 'Delete selected titles (Delete)';
+  deleteTextBtn.addEventListener('click', () => deleteSelectedTexts());
 
   const field = (label: string, control: HTMLElement) => {
     const wrap = document.createElement('label');
@@ -447,13 +442,43 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
   host.append(root);
 
   let selectedClipId: string | null = null;
+  /** Primary title for the form / on-picture handles. */
   let selectedTextId: string | null = null;
+  /** All selected title pills (includes primary). */
+  let selectedTextIds: string[] = [];
   let placement: TextPlacementHandle;
   let formClipId: string | null = null;
   let trimmingId: string | null = null;
   let trimmingEdge: 'in' | 'out' | null = null;
   /** Pixels before master t=0, so a trimmed head on the first clip stays visible. */
   let padPx = 0;
+  /** Live horizontal reorder of master scene clips. */
+  let clipReorder: {
+    clipId: string;
+    from: number;
+    /** Insert gap 0…n (before first … after last). */
+    gap: number;
+    active: boolean;
+    /** Pointer X minus the clip’s left edge at press. */
+    grabOffsetX: number;
+    clientX: number;
+  } | null = null;
+
+  const isTextSelected = (id: string) => selectedTextIds.includes(id);
+
+  const setSelectedTexts = (ids: string[], primaryId?: string | null) => {
+    const unique: string[] = [];
+    for (const id of ids) {
+      if (id && !unique.includes(id)) unique.push(id);
+    }
+    selectedTextIds = unique;
+    if (primaryId && unique.includes(primaryId)) selectedTextId = primaryId;
+    else selectedTextId = unique[unique.length - 1] ?? null;
+    deleteTextBtn.textContent =
+      unique.length > 1 ? `Delete (${unique.length})` : 'Delete';
+  };
+
+  const clearTextSelection = () => setSelectedTexts([]);
 
   const formatTime = (t: number) => {
     const m = Math.floor(t / 60);
@@ -463,16 +488,156 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
 
   const moveClip = (clipId: string, dir: -1 | 1) => {
     const project = api.getProject();
-    const clips = project.master.clips;
-    const i = clips.findIndex((c) => c.id === clipId);
+    const i = project.master.clips.findIndex((c) => c.id === clipId);
     if (i < 0) return;
-    const j = i + dir;
-    if (j < 0 || j >= clips.length) return;
-    const tmp = clips[i];
-    clips[i] = clips[j];
-    clips[j] = tmp;
+    reorderClipTo(clipId, i + dir);
+  };
+
+  /** Move a master clip to `toIndex` (no-op if unchanged / out of range). */
+  const reorderClipTo = (clipId: string, toIndex: number) => {
+    const project = api.getProject();
+    const clips = project.master.clips;
+    const from = clips.findIndex((c) => c.id === clipId);
+    if (from < 0) return false;
+    const to = Math.max(0, Math.min(clips.length - 1, toIndex));
+    if (from === to) return false;
+    const [item] = clips.splice(from, 1);
+    clips.splice(to, 0, item);
     api.onChange();
     refresh();
+    return true;
+  };
+
+  /** Gap under the pointer → destination index in the clips array. */
+  const gapToClipIndex = (gap: number, from: number, count: number) => {
+    let to = gap;
+    if (from < gap) to = gap - 1;
+    return Math.max(0, Math.min(count - 1, to));
+  };
+
+  /**
+   * Draft clip order while dragging. The dragged clip is removed then reinserted
+   * at the live gap so neighbors slide aside under the pointer.
+   */
+  const draftClipOrder = (): MasterClip[] => {
+    const clips = [...api.getProject().master.clips];
+    if (!clipReorder?.active) return clips;
+    const from = clips.findIndex((c) => c.id === clipReorder!.clipId);
+    if (from < 0) return clips;
+    const [item] = clips.splice(from, 1);
+    const to = gapToClipIndex(clipReorder.gap, from, clips.length + 1);
+    clips.splice(to, 0, item);
+    return clips;
+  };
+
+  const beginClipDrag = (e: PointerEvent, clipId: string) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('.ed-master-clip-actions, .ed-master-trim, .ed-master-qtrim')) return;
+
+    const project = api.getProject();
+    const clips = project.master.clips;
+    const from = clips.findIndex((c) => c.id === clipId);
+    if (from < 0) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    selectedClipId = clipId;
+    if (api.getPlaying()) api.onPause();
+
+    const clipEl = track.querySelector<HTMLElement>(`.ed-master-clip[data-clip-id="${clipId}"]`);
+    const grabOffsetX = clipEl
+      ? e.clientX - clipEl.getBoundingClientRect().left
+      : 0;
+
+    // Midpoints in content pixels at press — stable while neighbors slide.
+    const frozenMids: number[] = [];
+    {
+      let cursor = 0;
+      for (const c of clips) {
+        frozenMids.push((cursor + clipDuration(c) / 2) * PX_PER_SEC);
+        cursor += clipDuration(c);
+      }
+    }
+
+    const sceneName =
+      getSceneById(project, clips[from]?.sceneId ?? '')?.name ?? 'clip';
+
+    clipReorder = {
+      clipId,
+      from,
+      gap: from,
+      active: false,
+      grabOffsetX,
+      clientX: e.clientX,
+    };
+    layoutTrack();
+
+    const gapFromClientX = (clientX: number) => {
+      const x = clientX - track.getBoundingClientRect().left - padPx;
+      for (let i = 0; i < frozenMids.length; i++) {
+        if (i === from) continue;
+        if (x < frozenMids[i]) return i;
+      }
+      return frozenMids.length;
+    };
+
+    const swallowNextClick = () => {
+      const sink = (ev: MouseEvent) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        window.removeEventListener('click', sink, true);
+      };
+      window.addEventListener('click', sink, true);
+    };
+
+    const move = (ev: PointerEvent) => {
+      if (!clipReorder || clipReorder.clipId !== clipId) return;
+      clipReorder.clientX = ev.clientX;
+      if (!clipReorder.active) {
+        if (Math.abs(ev.clientX - e.clientX) < CLIP_DRAG_THRESHOLD_PX) return;
+        clipReorder.active = true;
+        track.classList.add('reordering');
+        api.setStatus('Drop to reorder');
+      }
+      ev.preventDefault();
+      clipReorder.gap = gapFromClientX(ev.clientX);
+      layoutTrack();
+    };
+
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      track.classList.remove('reordering');
+      const drag = clipReorder;
+      clipReorder = null;
+      if (!drag) {
+        layoutTrack();
+        return;
+      }
+      if (!drag.active) {
+        api.setStatus('Drag to reorder · yellow edges trim');
+        layoutTrack();
+        return;
+      }
+      swallowNextClick();
+      const to = gapToClipIndex(
+        drag.gap,
+        drag.from,
+        api.getProject().master.clips.length,
+      );
+      if (to === drag.from || !reorderClipTo(drag.clipId, to)) {
+        layoutTrack();
+        return;
+      }
+      api.setStatus(`Moved “${sceneName}”`);
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
 
   const removeClip = (clipId: string) => {
@@ -483,6 +648,7 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     }
     project.master.clips = project.master.clips.filter((c) => c.id !== clipId);
     if (selectedClipId === clipId) selectedClipId = null;
+    pruneMasterTextsToDuration(project);
     api.onChange();
     refresh();
   };
@@ -542,8 +708,10 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
         layoutTrack();
         return;
       }
+      pruneMasterTextsToDuration(api.getProject());
       api.setStatus(`Trim ${clip.in.toFixed(2)}–${clip.out.toFixed(2)}s`);
       api.onChange();
+      refresh();
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -583,30 +751,40 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
   track.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     const el = e.target as HTMLElement;
-    // Buttons and trim handles own this gesture. Scrubbing stays on the ruler.
-    if (el.closest('.ed-master-clip-actions, .ed-master-trim, .ed-master-qtrim')) return;
-
-    const clipEl = el.closest('.ed-master-clip') as HTMLElement | null;
-    if (clipEl?.dataset.clipId) {
-      if (clipEl.dataset.clipId !== selectedClipId) {
-        selectedClipId = clipEl.dataset.clipId;
-        api.setStatus('Drag the yellow edges to trim this clip');
-      }
-    } else {
-      selectedClipId = null;
+    // Buttons, trim handles, and clip bodies own their gestures.
+    if (
+      el.closest(
+        '.ed-master-clip-actions, .ed-master-trim, .ed-master-qtrim, .ed-master-clip',
+      )
+    ) {
+      return;
     }
+    selectedClipId = null;
     layoutTrack();
   });
 
   const selectedText = (): MasterTextClip | null =>
     api.getProject().master.texts.find((t) => t.id === selectedTextId) ?? null;
 
+  const deleteSelectedTexts = () => {
+    if (!selectedTextIds.length) return;
+    const project = api.getProject();
+    const removing = new Set(selectedTextIds);
+    const count = removing.size;
+    project.master.texts = project.master.texts.filter((t) => !removing.has(t.id));
+    compactMasterTextLanes(project.master.texts);
+    clearTextSelection();
+    api.onChange();
+    api.setStatus(count > 1 ? `Removed ${count} titles` : 'Removed title');
+    refresh();
+  };
+
   const duplicateSelectedText = () => {
     const source = selectedText();
     if (!source) return;
     const copy = duplicateMasterText(api.getProject(), source.id);
     if (!copy) return;
-    selectedTextId = copy.id;
+    setSelectedTexts([copy.id], copy.id);
     api.onChange();
     api.setStatus(`Duplicated “${copy.name}” onto the row below`);
     refresh();
@@ -629,7 +807,7 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     }
     const start = Math.min(api.getTime(), Math.max(0, total - 0.25));
     const clip = addMasterText(project, { text, name, start, duration: 4 });
-    selectedTextId = clip.id;
+    setSelectedTexts([clip.id], clip.id);
     const time = api.getTime();
     if (time < clip.start || time >= clip.start + clip.duration) {
       api.onSeek(clip.start);
@@ -695,14 +873,48 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    if (edge === 'end') {
+      // Keep multi-select so duration drag can resize the whole group.
+      if (!isTextSelected(clip.id)) setSelectedTexts([clip.id], clip.id);
+      else setSelectedTexts(selectedTextIds, clip.id);
+    } else if (additive) {
+      if (isTextSelected(clip.id)) {
+        setSelectedTexts(
+          selectedTextIds.filter((id) => id !== clip.id),
+          selectedTextId === clip.id ? null : selectedTextId,
+        );
+        syncForm();
+        layoutTrack();
+        placement.sync();
+        return;
+      }
+      setSelectedTexts([...selectedTextIds, clip.id], clip.id);
+    } else if (!isTextSelected(clip.id)) {
+      setSelectedTexts([clip.id], clip.id);
+    } else {
+      setSelectedTexts(selectedTextIds, clip.id);
+    }
+
+    const groupIds =
+      isTextSelected(clip.id) && selectedTextIds.length > 1
+        ? [...selectedTextIds]
+        : [clip.id];
+    const groupMove = edge === 'move' && groupIds.length > 1;
+    const groupResize = edge === 'end' && groupIds.length > 1;
+
     const startX = e.clientX;
     const originStart = clip.start;
     const originDur = clip.duration;
-    const originLane = clip.lane;
+    const origins = groupIds.flatMap((id) => {
+      const t = api.getProject().master.texts.find((x) => x.id === id);
+      return t ? [{ id, start: t.start, duration: t.duration, lane: t.lane }] : [];
+    });
     const snapshot = api.getProject().master.texts.map((t) => ({ id: t.id, lane: t.lane }));
-    selectedTextId = clip.id;
     syncForm();
     placement.sync();
+    layoutTrack();
 
     const rowFromY = (clientY: number) => {
       const rect = textStack.getBoundingClientRect();
@@ -727,14 +939,53 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
       });
     };
 
-    const apply = (clientX: number, clientY: number) => {
-      const dt = (clientX - startX) / PX_PER_SEC;
-      const timeMoved = Math.abs(dt) >= 0.02;
-      if (timeMoved) {
-        if (edge === 'move') placeText(clip, originStart + dt, originDur);
-        else placeText(clip, originStart, originDur + dt);
+    const clampGroupDt = (rawDt: number) => {
+      const total = masterDuration(api.getProject());
+      let lo = -Infinity;
+      let hi = Infinity;
+      for (const o of origins) {
+        lo = Math.max(lo, -o.start);
+        hi = Math.min(hi, Math.max(0, total - 0.25) - o.start);
       }
-      if (edge === 'move') reorderTo(rowFromY(clientY));
+      return Math.max(lo, Math.min(hi, rawDt));
+    };
+
+    const clampGroupDurDt = (rawDt: number) => {
+      const total = masterDuration(api.getProject());
+      let lo = -Infinity;
+      let hi = Infinity;
+      for (const o of origins) {
+        lo = Math.max(lo, 0.25 - o.duration);
+        hi = Math.min(hi, Math.max(0.25, total - o.start) - o.duration);
+      }
+      return Math.max(lo, Math.min(hi, rawDt));
+    };
+
+    const apply = (clientX: number, clientY: number) => {
+      const rawDt = (clientX - startX) / PX_PER_SEC;
+      const timeMoved = Math.abs(rawDt) >= 0.02;
+      if (edge === 'end') {
+        if (groupResize) {
+          const dt = clampGroupDurDt(rawDt);
+          const texts = api.getProject().master.texts;
+          for (const o of origins) {
+            const t = texts.find((x) => x.id === o.id);
+            if (t) placeText(t, o.start, o.duration + dt);
+          }
+        } else if (timeMoved) {
+          placeText(clip, originStart, originDur + rawDt);
+        }
+      } else if (groupMove) {
+        const dt = clampGroupDt(rawDt);
+        const texts = api.getProject().master.texts;
+        for (const o of origins) {
+          const t = texts.find((x) => x.id === o.id);
+          if (t) placeText(t, o.start + dt, o.duration);
+        }
+      } else {
+        if (timeMoved) placeText(clip, originStart + rawDt, originDur);
+        reorderTo(rowFromY(clientY));
+      }
       layoutTrack();
     };
 
@@ -742,13 +993,27 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      const changed =
-        clip.start !== originStart || clip.duration !== originDur || clip.lane !== originLane;
+      const texts = api.getProject().master.texts;
+      const changed = origins.some((o) => {
+        const t = texts.find((x) => x.id === o.id);
+        if (!t) return false;
+        return t.start !== o.start || t.duration !== o.duration || t.lane !== o.lane;
+      });
       if (!changed) {
+        if (!additive && !groupMove && !groupResize) setSelectedTexts([clip.id], clip.id);
         layoutTrack();
+        syncForm();
         return;
       }
-      api.setStatus(`${clip.name}  ${clip.start.toFixed(2)}–${(clip.start + clip.duration).toFixed(2)}s`);
+      if (groupMove) {
+        api.setStatus(`Moved ${origins.length} titles`);
+      } else if (groupResize) {
+        api.setStatus(`Resized ${origins.length} titles`);
+      } else {
+        api.setStatus(
+          `${clip.name}  ${clip.start.toFixed(2)}–${(clip.start + clip.duration).toFixed(2)}s`,
+        );
+      }
       api.onChange();
       syncForm();
     };
@@ -760,9 +1025,99 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     if (e.button !== 0) return;
     const el = e.target as HTMLElement;
     if (el.closest('.ed-master-text-pill')) return;
-    selectedTextId = null;
-    syncForm();
-    layoutTrack();
+
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    const stackRect = () => textStack.getBoundingClientRect();
+    const localPoint = (ev: PointerEvent) => {
+      const rect = stackRect();
+      return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    };
+    const origin = localPoint(e);
+    let moved = false;
+    let marquee: HTMLDivElement | null = null;
+
+    const ensureMarquee = () => {
+      if (marquee) return marquee;
+      marquee = document.createElement('div');
+      marquee.className = 'ed-tl-marquee';
+      textStack.append(marquee);
+      return marquee;
+    };
+
+    const pillsInMarquee = (box: {
+      left: number;
+      top: number;
+      right: number;
+      bottom: number;
+    }): string[] => {
+      const rect = stackRect();
+      const hits: string[] = [];
+      for (const pill of textStack.querySelectorAll<HTMLElement>('.ed-master-text-pill')) {
+        const id = pill.dataset.textId;
+        if (!id) continue;
+        const r = pill.getBoundingClientRect();
+        const left = r.left - rect.left;
+        const right = r.right - rect.left;
+        const top = r.top - rect.top;
+        const bottom = r.bottom - rect.top;
+        if (right < box.left || left > box.right || bottom < box.top || top > box.bottom) continue;
+        hits.push(id);
+      }
+      return hits;
+    };
+
+    const move = (ev: PointerEvent) => {
+      const cur = localPoint(ev);
+      if (!moved && Math.abs(cur.x - origin.x) < 4 && Math.abs(cur.y - origin.y) < 4) return;
+      moved = true;
+      const box = {
+        left: Math.min(origin.x, cur.x),
+        top: Math.min(origin.y, cur.y),
+        right: Math.max(origin.x, cur.x),
+        bottom: Math.max(origin.y, cur.y),
+      };
+      const m = ensureMarquee();
+      m.style.left = `${box.left}px`;
+      m.style.top = `${box.top}px`;
+      m.style.width = `${box.right - box.left}px`;
+      m.style.height = `${box.bottom - box.top}px`;
+    };
+
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      marquee?.remove();
+      if (!moved) {
+        if (!additive) clearTextSelection();
+        syncForm();
+        layoutTrack();
+        placement.sync();
+        return;
+      }
+      const cur = localPoint(ev);
+      const box = {
+        left: Math.min(origin.x, cur.x),
+        top: Math.min(origin.y, cur.y),
+        right: Math.max(origin.x, cur.x),
+        bottom: Math.max(origin.y, cur.y),
+      };
+      const hits = pillsInMarquee(box);
+      if (additive) {
+        const merged = [...selectedTextIds];
+        for (const id of hits) {
+          if (!merged.includes(id)) merged.push(id);
+        }
+        setSelectedTexts(merged);
+      } else {
+        setSelectedTexts(hits);
+      }
+      syncForm();
+      layoutTrack();
+      placement.sync();
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   });
 
   const refresh = () => {
@@ -772,9 +1127,18 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     track.replaceChildren();
 
     textStack.replaceChildren();
-    if (!project.master.texts.some((t) => t.id === selectedTextId)) selectedTextId = null;
 
-    const laneCount = Math.max(1, ...project.master.texts.map((t) => t.lane + 1));
+    // Scene length changes must clamp clip in/out (e.g. 5s → 1.5s).
+    const clippedToScenes = normalizeAllMasterClips(project);
+    // Titles past the master end leave empty “T” rows (pills sit outside the track).
+    const prunedOrphans = pruneMasterTextsToDuration(project);
+    setSelectedTexts(
+      selectedTextIds.filter((id) => project.master.texts.some((t) => t.id === id)),
+      selectedTextId,
+    );
+
+    // One row per title; no titles → no rows.
+    const laneCount = project.master.texts.length;
     const rows: HTMLElement[] = [];
     for (let i = 0; i < laneCount; i += 1) {
       const row = document.createElement('div');
@@ -793,7 +1157,8 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
       const pill = document.createElement('div');
       pill.className = 'ed-master-text-pill';
       pill.dataset.textId = clip.id;
-      pill.title = 'Drag sideways to move in time, up or down to change row. Drag the right edge to change duration.';
+      pill.title =
+        'Drag sideways to move · up/down to change row · drag empty area to multi-select · Delete to remove';
 
       const label = document.createElement('div');
       label.className = 'ed-master-text-pill-label';
@@ -801,7 +1166,7 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
 
       const edge = document.createElement('div');
       edge.className = 'ed-master-text-pill-edge';
-      edge.title = 'Drag to change duration';
+      edge.title = 'Drag to change duration · extends all selected';
       edge.addEventListener('pointerdown', (ev) => beginTextDrag(ev, clip, 'end'));
 
       pill.addEventListener('pointerdown', (ev) => {
@@ -849,7 +1214,8 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
       );
 
       el.append(label, meta, actions);
-      el.title = 'Click to trim';
+      el.title = 'Drag to reorder · click then yellow edges to trim';
+      el.addEventListener('pointerdown', (ev) => beginClipDrag(ev, clip.id));
       track.append(el);
     }
 
@@ -886,6 +1252,14 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     track.append(qtrim);
 
     layoutTrack();
+    if (clippedToScenes || prunedOrphans) {
+      if (prunedOrphans) {
+        api.setStatus('Removed titles past the end of the master');
+      } else if (clippedToScenes) {
+        api.setStatus('Master clips trimmed to scene length');
+      }
+      queueMicrotask(() => api.onChange());
+    }
   };
 
   const renderRuler = (total: number, width: number, pad: number) => {
@@ -940,7 +1314,10 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     textStack.querySelectorAll<HTMLElement>('.ed-master-textrow').forEach((row) => {
       row.style.width = `${width}px`;
     });
-    track.classList.toggle('trimming-open', Boolean(selected && selectedScene));
+    track.classList.toggle(
+      'trimming-open',
+      Boolean(selected && selectedScene && !clipReorder?.active),
+    );
     renderRuler(total, width, padPx);
 
     const pills = textStack.querySelectorAll<HTMLElement>('.ed-master-text-pill');
@@ -949,30 +1326,50 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
       if (!clip) return;
       const row = textStack.querySelector<HTMLElement>(`[data-lane="${clip.lane}"]`);
       if (row && el.parentElement !== row) row.append(el);
-      const selectedHere = selectedTextId === clip.id;
       el.style.left = `${padPx + clip.start * PX_PER_SEC}px`;
       el.style.width = `${Math.max(clip.duration * PX_PER_SEC, 36)}px`;
-      el.classList.toggle('selected', selectedHere);
+      el.classList.toggle('selected', isTextSelected(clip.id));
       const label = el.querySelector('.ed-master-text-pill-label');
       if (label) label.textContent = clip.name || clip.text.split('\n')[0] || 'Title';
     });
 
-    const nodes = track.querySelectorAll<HTMLElement>('.ed-master-clip');
+    const order = draftClipOrder();
+    const nodeById = new Map(
+      [...track.querySelectorAll<HTMLElement>('.ed-master-clip')].map((el) => [
+        el.dataset.clipId ?? '',
+        el,
+      ]),
+    );
+    const reordering = Boolean(clipReorder?.active);
     let cursor = 0;
-    nodes.forEach((el, i) => {
-      const clip = project.master.clips[i];
-      if (!clip) return;
+    let dropLineX: number | null = null;
+    for (const clip of order) {
+      const el = nodeById.get(clip.id);
+      if (!el) continue;
       const scene = getSceneById(project, clip.sceneId);
       const dur = clipDuration(clip);
-      const trimming = trimmingId === clip.id;
+      const trimming = !reordering && trimmingId === clip.id;
       const selectedHere = selectedClipId === clip.id;
-      el.style.left = `${padPx + cursor * PX_PER_SEC}px`;
-      el.style.width = `${Math.max(dur * PX_PER_SEC, 4)}px`;
+      const draggingHere = reordering && clipReorder?.clipId === clip.id;
+      const slotLeft = padPx + cursor * PX_PER_SEC;
+      const width = Math.max(dur * PX_PER_SEC, 4);
+      if (draggingHere && clipReorder) {
+        const trackLeft = track.getBoundingClientRect().left;
+        const follow = clipReorder.clientX - trackLeft - clipReorder.grabOffsetX;
+        el.style.left = `${follow}px`;
+        dropLineX = slotLeft;
+      } else {
+        el.style.left = `${slotLeft}px`;
+      }
+      el.style.width = `${width}px`;
       el.classList.toggle('selected', selectedHere);
       el.classList.toggle('trimming', trimming);
-      el.title = selectedHere
-        ? `${scene?.name ?? 'Missing'}  ${clip.in.toFixed(2)}–${clip.out.toFixed(2)}s`
-        : 'Click to trim';
+      el.classList.toggle('dragging', draggingHere);
+      el.title = draggingHere
+        ? 'Drop to place'
+        : selectedHere
+          ? `${scene?.name ?? 'Missing'}  ${clip.in.toFixed(2)}–${clip.out.toFixed(2)}s · drag to reorder`
+          : 'Drag to reorder · click then yellow edges to trim';
       const meta = el.querySelector('.ed-master-clip-meta');
       if (meta) {
         meta.textContent =
@@ -981,10 +1378,23 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
             : `${dur.toFixed(1)}s`;
       }
       cursor += dur;
-    });
+    }
+
+    let drop = track.querySelector<HTMLElement>('.ed-master-drop');
+    if (reordering && dropLineX != null) {
+      if (!drop) {
+        drop = document.createElement('div');
+        drop.className = 'ed-master-drop';
+        track.append(drop);
+      }
+      drop.hidden = false;
+      drop.style.left = `${dropLineX}px`;
+    } else if (drop) {
+      drop.hidden = true;
+    }
 
     const qtrim = track.querySelector<HTMLElement>('.ed-master-qtrim');
-    if (qtrim && selected && selectedScene) {
+    if (qtrim && selected && selectedScene && !reordering) {
       const filmLeft = padPx + (selectedStart - selected.in) * PX_PER_SEC;
       qtrim.hidden = false;
       qtrim.style.left = `${filmLeft}px`;
@@ -1054,9 +1464,15 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
+    if (isTypingTarget(e.target)) return;
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTextIds.length) {
+      e.preventDefault();
+      deleteSelectedTexts();
+      return;
+    }
     if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
     if (e.key.toLowerCase() !== 'd') return;
-    if (isTypingTarget(e.target) || !selectedText()) return;
+    if (!selectedText()) return;
     e.preventDefault();
     duplicateSelectedText();
   };
@@ -1069,7 +1485,7 @@ export function mountMasterUi(host: HTMLElement, api: MasterUiApi): MasterUiHand
     getPlaying: api.getPlaying,
     getSelectedId: () => selectedTextId,
     select: (id) => {
-      selectedTextId = id;
+      setSelectedTexts([id], id);
       syncForm();
       layoutTrack();
     },

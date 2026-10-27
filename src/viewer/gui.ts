@@ -506,7 +506,7 @@ export function createGui(
   const logo = viewer.logo.params;
   logoFolder.add(logo, 'enabled').onChange(() => viewer.logo.applyParams());
   logoFolder
-    .add(logo, 'mark', { WRT: 0, 'We are a team': 1 })
+    .add(logo, 'mark', { WRT: 0, 'We are a team': 1, 'Team marquee': 2 })
     .name('mark')
     .onChange((value: number) => {
       const mark = logoMarkIndex(Number(value));
@@ -591,6 +591,10 @@ export function createGui(
   dotFolder.add(dg, 'pulseHz', 0.1, 4, 0.05).onChange(applyDg);
   dotFolder.add(dg, 'wave', 0, 2, 0.01).onChange(applyDg);
   dotFolder.add(dg, 'waveSpeed', 0.1, 4, 0.05).onChange(applyDg);
+  dotFolder
+    .add(dg, 'marqueeSpeed', 0, 0.6, 0.005)
+    .name('marqueeSpeed')
+    .onChange(applyDg);
   dotFolder.add(dg, 'glow', 0, 2, 0.01).onChange(applyDg);
   dotFolder.add(dg, 'flashDecay', 0.5, 8, 0.1);
   dotFolder.add(dg, 'dotSize', 0.1, 0.9, 0.01).onChange(applyDg);

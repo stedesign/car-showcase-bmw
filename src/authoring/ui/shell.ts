@@ -1,6 +1,7 @@
 import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
 import type { PlanesHandle } from '../planes';
+import type { PathsHandle } from '../paths';
 import type { EditorMode, Project, Scene, Selection } from '../project';
 import type { TimelineEngine } from '../timeline';
 import { renderHierarchy } from './hierarchy';
@@ -22,6 +23,7 @@ export type EditorShellOptions = {
   select: (kind: Selection['kind'], id: string | null) => void;
   cameras: CamerasHandle;
   planes: PlanesHandle;
+  paths: PathsHandle;
   timeline: TimelineEngine;
   getMasterTime: () => number;
   getMasterDuration: () => number;
@@ -52,6 +54,7 @@ export type EditorShellOptions = {
   onDeleteScene: (sceneId: string) => void;
   onDeleteAllScenes: () => void;
   onRenameScene: (sceneId: string, name: string) => void;
+  onReorderScenes: (sceneId: string, toIndex: number) => void;
   setStatus: (msg: string) => void;
   isRecording: () => boolean;
   isPreviewing: () => boolean;
@@ -162,7 +165,11 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
     modeGroup,
     mkBtn('Save', '', opts.onSave),
     mkBtn('Export JSON', '', opts.onExport),
-    mkBtn('Import JSON', '', () => importInput.click()),
+    (() => {
+      const b = mkBtn('Import JSON', '', () => importInput.click());
+      b.title = 'Open a project JSON — replace everything, or merge scenes';
+      return b;
+    })(),
     mkBtn('New', 'danger', () => void opts.onReset()),
     spacer,
     previewBtn,
@@ -343,6 +350,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       });
     } else {
       timelineUi = mountTimelineUi(timelineContent, {
+        getProject: opts.getProject,
         getScene: opts.getScene,
         getSelection: opts.getSelection,
         timeline: opts.timeline,
@@ -368,6 +376,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       select: opts.select,
       cameras: opts.cameras,
       planes: opts.planes,
+      paths: opts.paths,
       onChange: onEdit,
       onSelectScene: opts.onSelectScene,
       onAddScene: opts.onAddScene,
@@ -375,6 +384,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       onDeleteScene: opts.onDeleteScene,
       onDeleteAllScenes: opts.onDeleteAllScenes,
       onRenameScene: opts.onRenameScene,
+      onReorderScenes: opts.onReorderScenes,
       onClearScene: opts.onClearTimeline,
     });
     renderInspector(right, {
@@ -384,6 +394,7 @@ export function mountEditorShell(opts: EditorShellOptions): EditorShell {
       getSelection: opts.getSelection,
       cameras: opts.cameras,
       planes: opts.planes,
+      paths: opts.paths,
       onChange: onEdit,
       onLookEdit: opts.onEdit,
       setStatus: opts.setStatus,

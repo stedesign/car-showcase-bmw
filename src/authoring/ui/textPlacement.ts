@@ -5,9 +5,16 @@ import {
   setMasterTextEditing,
   type MasterTextBlock,
 } from '../masterTextOverlay';
-import { TEXT_SIZE_MIN, textSizeMax, type MasterTextClip, type Project } from '../project';
+import {
+  TEXT_SIZE_MIN,
+  clampTextBoxW,
+  textSizeMax,
+  type MasterTextClip,
+  type Project,
+} from '../project';
 
 type Corner = 'nw' | 'ne' | 'sw' | 'se';
+type Edge = 'e' | 'w';
 
 export type TextPlacementApi = {
   getCanvas: () => HTMLCanvasElement;
@@ -68,12 +75,49 @@ export function mountTextPlacement(
   stage.hidden = true;
   viewport.append(stage);
 
+  const guides = document.createElement('div');
+  guides.className = 'ed-text-guides';
+  guides.hidden = true;
+  const guideV = document.createElement('div');
+  guideV.className = 'ed-text-guide v';
+  const guideH = document.createElement('div');
+  guideH.className = 'ed-text-guide h';
+  guides.append(guideV, guideH);
+  stage.append(guides);
+
   const nodes = new Map<string, HitNode>();
   let gestureId: string | null = null;
   let editingId: string | null = null;
   let editor: HTMLTextAreaElement | null = null;
   let suspendBlur = false;
   let disposed = false;
+
+  const clearGuides = () => {
+    guides.hidden = true;
+    guideV.hidden = true;
+    guideH.hidden = true;
+  };
+
+  /** Yellow center lines over the canvas; only the active axes are shown. */
+  const showGuides = (snapV: boolean, snapH: boolean) => {
+    if (!snapV && !snapH) {
+      clearGuides();
+      return;
+    }
+    const canvas = api.getCanvas();
+    const view = viewport.getBoundingClientRect();
+    const rect = canvas.getBoundingClientRect();
+    guides.hidden = false;
+    guides.style.left = `${rect.left - view.left}px`;
+    guides.style.top = `${rect.top - view.top}px`;
+    guides.style.width = `${rect.width}px`;
+    guides.style.height = `${rect.height}px`;
+    guideV.hidden = !snapV;
+    guideH.hidden = !snapH;
+  };
+
+  const centerSnapPx = (frameW: number, frameH: number) =>
+    Math.max(8, Math.min(14, Math.min(frameW, frameH) * 0.01));
 
   const clipById = (id: string) => api.getProject().master.texts.find((t) => t.id === id) ?? null;
 
@@ -93,6 +137,7 @@ export function mountTextPlacement(
     const shift = Math.round(((type.lineHeight - 1) / 2) * cssPx * 100) / 100;
     const color = editorColor(clip);
     const tracking = clip.effect === 'marquee' ? cssPx * MARQUEE_TRACKING_EM : 0;
+    const boxed = Number.isFinite(clip.boxW) && (clip.boxW as number) > 0;
     const signature = [
       type.family,
       type.weight,
@@ -103,6 +148,7 @@ export function mountTextPlacement(
       shift,
       clip.effect,
       tracking,
+      boxed ? 'box' : 'auto',
     ].join('|');
     if (editor.dataset.style !== signature) {
       editor.dataset.style = signature;
@@ -118,6 +164,8 @@ export function mountTextPlacement(
         clip.effect === 'fade' ? `0 0 ${cssPx * 0.18}px rgba(0, 0, 0, 0.55)` : 'none';
       editor.style.top = `${-shift}px`;
       editor.style.height = `calc(100% + ${shift}px)`;
+      editor.wrap = boxed ? 'soft' : 'off';
+      editor.classList.toggle('boxed', boxed);
     }
     if (editor.value !== clip.text) editor.value = clip.text;
   };
@@ -159,10 +207,15 @@ export function mountTextPlacement(
     node.hit.title =
       clip.effect === 'marquee'
         ? 'Drag up or down to move. Drag a corner to resize. The line slides on its own.'
-        : 'Drag to move. Click to edit';
+        : 'Drag to move. Side handles set wrap width. Corners scale size. Click to edit';
     const selected = api.getSelectedId() === clip.id;
     node.hit.classList.toggle('selected', selected);
     node.hit.classList.toggle('editing', editingId === clip.id);
+    node.hit.classList.toggle('marquee', clip.effect === 'marquee');
+    node.hit.classList.toggle(
+      'boxed',
+      Number.isFinite(clip.boxW) && (clip.boxW as number) > 0,
+    );
     styleEditor(clip, block, sy);
     const showBadge = gestureId === clip.id && editingId !== clip.id;
     node.badge.hidden = !showBadge;
@@ -175,6 +228,7 @@ export function mountTextPlacement(
 
   const finishGesture = (moved: boolean, label: string) => {
     gestureId = null;
+    clearGuides();
     sync();
     if (!moved) return;
     api.setStatus(label);
@@ -312,19 +366,48 @@ export function mountTextPlacement(
       const dy = p.y - pointer.y;
       if (!moved && Math.hypot(dx, dy) < 3) return;
       moved = true;
+      const midX = canvas.width / 2;
+      const midY = canvas.height / 2;
+      const thresh = centerSnapPx(canvas.width, canvas.height);
+      let snapV = false;
+      let snapH = false;
       if (clip.effect === 'marquee') {
         clip.y = (originY + dy) / canvas.height;
-        const placed = measureMasterTextBlock(clip, canvas.width, canvas.height);
-        if (placed) clip.y = placed.originY / canvas.height;
+        let placed = measureMasterTextBlock(clip, canvas.width, canvas.height);
+        if (placed) {
+          const cy = placed.originY + placed.blockH / 2;
+          if (Math.abs(cy - midY) <= thresh) {
+            snapH = true;
+            clip.y = (midY - placed.blockH / 2) / canvas.height;
+            placed = measureMasterTextBlock(clip, canvas.width, canvas.height);
+          }
+          if (placed) clip.y = placed.originY / canvas.height;
+        }
       } else {
         clip.x = (originX + dx) / canvas.width;
         clip.y = (originY + dy) / canvas.height;
-        const placed = measureMasterTextBlock(clip, canvas.width, canvas.height);
+        let placed = measureMasterTextBlock(clip, canvas.width, canvas.height);
         if (placed) {
-          clip.x = placed.originX / canvas.width;
-          clip.y = placed.originY / canvas.height;
+          const cx = placed.originX + placed.blockW / 2;
+          const cy = placed.originY + placed.blockH / 2;
+          if (Math.abs(cx - midX) <= thresh) {
+            snapV = true;
+            clip.x = (midX - placed.blockW / 2) / canvas.width;
+          }
+          if (Math.abs(cy - midY) <= thresh) {
+            snapH = true;
+            clip.y = (midY - placed.blockH / 2) / canvas.height;
+          }
+          if (snapV || snapH) {
+            placed = measureMasterTextBlock(clip, canvas.width, canvas.height);
+          }
+          if (placed) {
+            clip.x = placed.originX / canvas.width;
+            clip.y = placed.originY / canvas.height;
+          }
         }
       }
+      showGuides(snapV, snapH);
       api.onLive();
       sync();
     };
@@ -332,8 +415,64 @@ export function mountTextPlacement(
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       const didMove = moved;
-      finishGesture(didMove, `${clip.name} moved`);
+      finishGesture(didMove, 'Title moved');
       if (!didMove) beginEdit(id, { x: ev.clientX, y: ev.clientY });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  const beginBox = (e: PointerEvent, id: string, edge: Edge) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    api.select(id);
+    if (api.getPlaying()) api.onPause();
+    const clip = clipById(id);
+    const canvas = api.getCanvas();
+    if (!clip || clip.effect === 'marquee' || canvas.width < 2) return;
+    const startBlock = measureMasterTextBlock(clip, canvas.width, canvas.height);
+    if (!startBlock) return;
+    const startBoxW =
+      clampTextBoxW(clip.boxW) ??
+      Math.min(1, Math.max(0.05, startBlock.blockW / canvas.width));
+    const startOriginX = startBlock.originX;
+    const right = startOriginX + startBoxW * canvas.width;
+    const pointer = toBuffer(e, canvas);
+    let moved = false;
+    gestureId = id;
+
+    const move = (ev: PointerEvent) => {
+      const p = toBuffer(ev, canvas);
+      const dx = p.x - pointer.x;
+      if (!moved && Math.abs(dx) < 3) return;
+      moved = true;
+      if (edge === 'e') {
+        const nextW = (startBoxW * canvas.width + dx) / canvas.width;
+        const boxW = clampTextBoxW(nextW);
+        if (boxW === undefined) return;
+        clip.boxW = boxW;
+        clip.x = startOriginX / canvas.width;
+      } else {
+        const nextLeft = startOriginX + dx;
+        const nextW = (right - nextLeft) / canvas.width;
+        const boxW = clampTextBoxW(nextW);
+        if (boxW === undefined) return;
+        clip.boxW = boxW;
+        clip.x = (right - boxW * canvas.width) / canvas.width;
+      }
+      const placed = measureMasterTextBlock(clip, canvas.width, canvas.height);
+      if (placed) {
+        clip.x = placed.originX / canvas.width;
+        if (Number.isFinite(clip.y)) clip.y = placed.originY / canvas.height;
+      }
+      api.onLive();
+      sync();
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      finishGesture(moved, 'Wrap width set');
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -416,7 +555,7 @@ export function mountTextPlacement(
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      finishGesture(moved, `${clip.name} resized`);
+      finishGesture(moved, 'Title resized');
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -426,14 +565,21 @@ export function mountTextPlacement(
     const hit = document.createElement('div');
     hit.className = 'ed-text-hit';
     hit.dataset.textId = id;
-    hit.title = 'Drag to move. Click to edit';
+    hit.title = 'Drag to move. Side handles set wrap width. Corners scale size. Click to edit';
     const frame = document.createElement('div');
     frame.className = 'ed-text-frame';
     for (const corner of ['nw', 'ne', 'sw', 'se'] as const) {
       const handle = document.createElement('div');
       handle.className = `ed-text-handle ${corner}`;
-      handle.title = 'Drag to resize';
+      handle.title = 'Drag to scale size';
       handle.addEventListener('pointerdown', (ev) => beginScale(ev, id, corner));
+      frame.append(handle);
+    }
+    for (const edge of ['e', 'w'] as const) {
+      const handle = document.createElement('div');
+      handle.className = `ed-text-handle ${edge}`;
+      handle.title = 'Drag to set wrap width';
+      handle.addEventListener('pointerdown', (ev) => beginBox(ev, id, edge));
       frame.append(handle);
     }
     const badge = document.createElement('div');
@@ -503,6 +649,7 @@ export function mountTextPlacement(
       editingId = null;
       setMasterTextEditing(null);
       editor = null;
+      clearGuides();
       observer.disconnect();
       stage.remove();
       nodes.clear();

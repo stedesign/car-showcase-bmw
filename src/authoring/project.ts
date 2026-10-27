@@ -13,8 +13,9 @@ import {
 import { createStoryboardProject } from './storyboard';
 
 export const PROJECT_STORAGE_KEY = 'wrt-paddock-project';
-export const PROJECT_VERSION = 3 as const;
+export const PROJECT_VERSION = 4 as const;
 export const LEGACY_PROJECT_VERSION = 2 as const;
+export const PROJECT_VERSION_V3 = 3 as const;
 
 export type Vec3 = { x: number; y: number; z: number };
 
@@ -24,6 +25,10 @@ export type CameraClip = {
   position: Vec3;
   target: Vec3;
   fov: number;
+  /** When set, eye position is derived from this path at `pathProgress`. */
+  pathId: string | null;
+  /** 0–1 progress along the attached path. */
+  pathProgress: number;
 };
 
 export type PlaneClip = {
@@ -37,6 +42,13 @@ export type PlaneClip = {
   color: string;
   /** When true, render as a box (scale.z = depth); otherwise a flat plane. */
   extrude: boolean;
+};
+
+/** Open Catmull-Rom control-point path for camera rides. */
+export type PathClip = {
+  id: string;
+  name: string;
+  points: Vec3[];
 };
 
 export type EasingName = 'linear' | 'easeInOut';
@@ -88,6 +100,7 @@ export type Scene = {
   look: SavedSettings;
   cameras: CameraClip[];
   planes: PlaneClip[];
+  paths: PathClip[];
   timeline: { tracks: TimelineTrack[] };
 };
 
@@ -127,6 +140,11 @@ export type MasterTextClip = {
    */
   x?: number;
   y?: number;
+  /**
+   * Wrap box width as a fraction of the frame width.
+   * When set, titles reflow to this width instead of staying on one line.
+   */
+  boxW?: number;
   /** Builtin font id, or an uploaded project font id. */
   font: string;
   /** CSS hex, `#rrggbb`. Masked headings tint the moving fill with this. */
@@ -164,6 +182,13 @@ export function clampMarqueeSpeed(value: unknown): number {
   const n = typeof value === 'number' ? value : Number.NaN;
   if (!Number.isFinite(n)) return MARQUEE_SPEED_DEFAULT;
   return Math.min(3, Math.max(-3, n));
+}
+
+/** Optional wrap width. Returns undefined when the title should stay auto-sized. */
+export function clampTextBoxW(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.min(1, Math.max(0.05, n));
 }
 
 export const DEFAULT_TEXT_COLOR = '#ffffff';
@@ -216,9 +241,12 @@ export type SelectionKind =
   | 'car'
   | 'carLights'
   | 'roofStrobe'
+  | 'airflow'
+  | 'motion'
   | 'lighting'
   | 'dotGrid'
   | 'plane'
+  | 'path'
   | null;
 
 /** Fixed selection id for the vehicle light rig (timeline: carLights.*). */
@@ -226,6 +254,12 @@ export const CAR_LIGHTS_ID = 'car-lights';
 
 /** Fixed selection id for the roof softbox strobe (timeline: roofStrobe.*). */
 export const ROOF_STROBE_ID = 'roof-strobe';
+
+/** Fixed selection id for the aerodynamic airflow (timeline: airflow.*). */
+export const AIRFLOW_ID = 'airflow';
+
+/** Fixed selection id for wheel spin + camera shake (timeline: motion.*). */
+export const MOTION_ID = 'motion';
 
 /** Fixed selection id for Look → Lighting (timeline: lighting.*). */
 export const LIGHTING_ID = 'lighting';
@@ -266,6 +300,7 @@ export function syncIdCounterFromScene(scene: Scene) {
   considerId(scene.id, max);
   scene.cameras.forEach((c) => considerId(c.id, max));
   scene.planes.forEach((p) => considerId(p.id, max));
+  scene.paths.forEach((p) => considerId(p.id, max));
   scene.timeline.tracks.forEach((t) => considerId(t.id, max));
   resetAuthoringIdCounter(max.n + 1);
 }
@@ -277,6 +312,7 @@ export function syncIdCounterFromProject(project: Project) {
     considerId(scene.id, max);
     scene.cameras.forEach((c) => considerId(c.id, max));
     scene.planes.forEach((p) => considerId(p.id, max));
+    scene.paths.forEach((p) => considerId(p.id, max));
     scene.timeline.tracks.forEach((t) => considerId(t.id, max));
   }
   for (const clip of project.master.clips) {
@@ -316,6 +352,8 @@ export function createDefaultCameras(viewer?: Viewer): CameraClip[] {
       position: cloneVec3(pos),
       target: cloneVec3(target),
       fov,
+      pathId: null,
+      pathProgress: 0,
     },
     {
       id: nextAuthoringId('camera'),
@@ -323,6 +361,8 @@ export function createDefaultCameras(viewer?: Viewer): CameraClip[] {
       position: vec3(pos.x + 2.2, pos.y + 0.15, pos.z - 1.5),
       target: cloneVec3(target),
       fov,
+      pathId: null,
+      pathProgress: 0,
     },
     {
       id: nextAuthoringId('camera'),
@@ -330,8 +370,16 @@ export function createDefaultCameras(viewer?: Viewer): CameraClip[] {
       position: vec3(target.x + 6.5, target.y + 0.4, target.z),
       target: cloneVec3(target),
       fov,
+      pathId: null,
+      pathProgress: 0,
     },
   ];
+}
+
+export function clampPathProgress(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
 }
 
 export function getActiveScene(project: Project): Scene {
@@ -366,6 +414,7 @@ export function createBlankScene(name: string, look: SavedSettings, viewer?: Vie
     look: structuredClone(look),
     cameras,
     planes: [],
+    paths: [],
     timeline: { tracks: [] },
   };
 }
@@ -403,10 +452,32 @@ export function migrateLegacyV2(legacy: LegacyProjectV2): Project {
     look: structuredClone(legacy.look),
     cameras: structuredClone(legacy.cameras),
     planes: structuredClone(legacy.planes ?? []),
+    paths: [],
     timeline: { tracks: structuredClone(legacy.timeline.tracks) },
   };
-  normalizeScenePlanes(scene);
+  normalizeScenePaths(scene);
   return wrapSceneAsProject(scene, legacy.name, legacy.fps);
+}
+
+type ProjectV3 = Omit<Project, 'version' | 'scenes'> & {
+  version: typeof PROJECT_VERSION_V3;
+  scenes: Array<Omit<Scene, 'paths'> & { paths?: PathClip[] }>;
+};
+
+export function migrateProjectV3(legacy: ProjectV3): Project {
+  const project: Project = {
+    ...legacy,
+    version: PROJECT_VERSION,
+    scenes: legacy.scenes.map((s) => {
+      const scene: Scene = {
+        ...s,
+        paths: structuredClone(s.paths ?? []),
+      };
+      normalizeScenePaths(scene);
+      return scene;
+    }),
+  };
+  return project;
 }
 
 export function addSceneToProject(project: Project, scene: Scene): Scene {
@@ -415,14 +486,16 @@ export function addSceneToProject(project: Project, scene: Scene): Scene {
   return scene;
 }
 
-export function duplicateScene(project: Project, sceneId: string): Scene | null {
-  const source = getSceneById(project, sceneId);
-  if (!source) return null;
+/**
+ * Deep-clone a scene with fresh ids so it can sit beside the original
+ * (or beside scenes from another project) without collisions.
+ */
+export function cloneSceneWithFreshIds(source: Scene, name = source.name): Scene {
   const copy = structuredClone(source);
   copy.id = nextAuthoringId('scene');
-  copy.name = `${source.name} Copy`;
-  // Remap camera / plane / track ids so scenes stay independent.
+  copy.name = name;
   const idMap = new Map<string, string>();
+  if (!copy.paths) copy.paths = [];
   for (const cam of copy.cameras) {
     const nid = nextAuthoringId('camera');
     idMap.set(cam.id, nid);
@@ -433,15 +506,23 @@ export function duplicateScene(project: Project, sceneId: string): Scene | null 
     idMap.set(plane.id, nid);
     plane.id = nid;
   }
+  for (const path of copy.paths) {
+    const nid = nextAuthoringId('path');
+    idMap.set(path.id, nid);
+    path.id = nid;
+  }
+  for (const cam of copy.cameras) {
+    if (cam.pathId && idMap.has(cam.pathId)) {
+      cam.pathId = idMap.get(cam.pathId)!;
+    }
+  }
   for (const track of copy.timeline.tracks) {
     track.id = nextAuthoringId('track');
-    // Remap target ids embedded in track targets.
     const parts = track.target.split('.');
     if (parts.length >= 2 && idMap.has(parts[1])) {
       parts[1] = idMap.get(parts[1])!;
       track.target = parts.join('.');
     }
-    // Remap camera.active keyframe values
     if (track.target === 'camera.active') {
       for (const kf of track.keyframes) {
         if (typeof kf.value === 'string' && idMap.has(kf.value)) {
@@ -453,9 +534,63 @@ export function duplicateScene(project: Project, sceneId: string): Scene | null 
   if (idMap.has(copy.playCameraId)) {
     copy.playCameraId = idMap.get(copy.playCameraId)!;
   }
+  normalizeScenePaths(copy);
+  return copy;
+}
+
+export function duplicateScene(project: Project, sceneId: string): Scene | null {
+  const source = getSceneById(project, sceneId);
+  if (!source) return null;
+  const copy = cloneSceneWithFreshIds(source, `${source.name} Copy`);
   project.scenes.push(copy);
   project.activeSceneId = copy.id;
   return copy;
+}
+
+export type MergeScenesOptions = {
+  /** Append a full-length master clip for each merged scene. */
+  addToMaster?: boolean;
+};
+
+/** Append clones of `scenes` into `project`. IDs are remapped; master titles stay. */
+export function mergeScenesIntoProject(
+  project: Project,
+  scenes: Scene[],
+  opts: MergeScenesOptions = {},
+): Scene[] {
+  if (!scenes.length) return [];
+  syncIdCounterFromProject(project);
+  const added: Scene[] = [];
+  for (const source of scenes) {
+    const copy = cloneSceneWithFreshIds(source);
+    project.scenes.push(copy);
+    added.push(copy);
+    if (opts.addToMaster) {
+      project.master.clips.push({
+        id: nextAuthoringId('mclip'),
+        sceneId: copy.id,
+        in: 0,
+        out: copy.duration,
+      });
+    }
+  }
+  project.activeSceneId = added[added.length - 1].id;
+  return added;
+}
+
+/** Move a scene to a new index in `project.scenes`. Master clips are unchanged. */
+export function reorderScene(
+  project: Project,
+  sceneId: string,
+  toIndex: number,
+): boolean {
+  const from = project.scenes.findIndex((s) => s.id === sceneId);
+  if (from < 0) return false;
+  const to = Math.max(0, Math.min(project.scenes.length - 1, toIndex));
+  if (from === to) return false;
+  const [item] = project.scenes.splice(from, 1);
+  project.scenes.splice(to, 0, item);
+  return true;
 }
 
 export function deleteScene(project: Project, sceneId: string): boolean {
@@ -528,6 +663,28 @@ export function compactMasterTextLanes(texts: MasterTextClip[]): void {
   const lanes = [...new Set(texts.map((t) => t.lane))].sort((a, b) => a - b);
   const map = new Map(lanes.map((lane, i) => [lane, i]));
   for (const t of texts) t.lane = map.get(t.lane) ?? 0;
+}
+
+/**
+ * Drop titles that start at or past the master end (leftovers after clips shrink),
+ * and clamp the rest so they stay inside the timeline. Returns true if any were removed.
+ */
+export function pruneMasterTextsToDuration(project: Project): boolean {
+  const total = masterDuration(project);
+  const prev = project.master.texts.length;
+  if (total <= 0) {
+    project.master.texts = [];
+  } else {
+    project.master.texts = project.master.texts.filter((t) => t.start < total);
+    for (const t of project.master.texts) {
+      t.duration = Math.min(
+        Math.max(0.25, t.duration),
+        Math.max(0.25, total - t.start),
+      );
+    }
+  }
+  compactMasterTextLanes(project.master.texts);
+  return project.master.texts.length !== prev;
 }
 
 function settleMasterTextLanes(texts: MasterTextClip[]): void {
@@ -618,6 +775,8 @@ export function normalizeMasterTexts(project: Project): void {
     };
     if (Number.isFinite(src.x)) clip.x = src.x as number;
     if (Number.isFinite(src.y)) clip.y = src.y as number;
+    const boxW = clampTextBoxW(src.boxW);
+    if (boxW !== undefined) clip.boxW = boxW;
     texts.push(clip);
   }
   settleMasterTextLanes(texts);
@@ -662,6 +821,8 @@ export function addMasterText(
   };
   if (Number.isFinite(partial?.x)) clip.x = partial?.x;
   if (Number.isFinite(partial?.y)) clip.y = partial?.y;
+  const boxW = clampTextBoxW(partial?.boxW);
+  if (boxW !== undefined) clip.boxW = boxW;
   project.master.texts.push(clip);
   return clip;
 }
@@ -685,6 +846,26 @@ export function normalizeMasterClip(clip: MasterClip, scene: Scene): void {
   const dur = Math.max(0.5, scene.duration);
   clip.in = Math.max(0, Math.min(clip.in, dur - 0.05));
   clip.out = Math.max(clip.in + 0.05, Math.min(clip.out, dur));
+}
+
+/**
+ * Clamp every master clip to its scene length.
+ * Shortening a scene (e.g. 5s → 1.5s) shrinks matching clips so the master
+ * timeline stays in sync. Returns true when any in/out changed.
+ */
+export function normalizeAllMasterClips(project: Project): boolean {
+  let changed = false;
+  for (const clip of project.master.clips) {
+    const scene = getSceneById(project, clip.sceneId);
+    if (!scene) continue;
+    const prevIn = clip.in;
+    const prevOut = clip.out;
+    normalizeMasterClip(clip, scene);
+    if (Math.abs(clip.in - prevIn) > 1e-6 || Math.abs(clip.out - prevOut) > 1e-6) {
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 /** Default project is the M Hybrid V8 storyboard commercial. */
@@ -711,13 +892,54 @@ function normalizeScenePlanes(scene: Scene) {
   );
 }
 
+function normalizeCameraPathFields(cam: CameraClip, pathIds: Set<string>) {
+  if (typeof cam.pathId !== 'string' || !pathIds.has(cam.pathId)) {
+    cam.pathId = null;
+  }
+  cam.pathProgress = clampPathProgress(cam.pathProgress);
+}
+
+/** Ensure paths array, valid control points, and camera path attachments. */
+export function normalizeScenePaths(scene: Scene) {
+  normalizeScenePlanes(scene);
+  if (!Array.isArray(scene.paths)) scene.paths = [];
+  for (const path of scene.paths) {
+    if (!Array.isArray(path.points)) path.points = [];
+    path.points = path.points
+      .filter(
+        (p) =>
+          p &&
+          typeof p.x === 'number' &&
+          typeof p.y === 'number' &&
+          typeof p.z === 'number',
+      )
+      .map((p) => cloneVec3(p));
+    if (path.points.length < 2) {
+      path.points = [
+        vec3(-4, 1.2, 4),
+        vec3(4, 1.0, 2),
+      ];
+    }
+  }
+  const pathIds = new Set(scene.paths.map((p) => p.id));
+  for (const cam of scene.cameras) {
+    normalizeCameraPathFields(cam, pathIds);
+  }
+}
+
 export function parseProject(raw: string): Project | null {
   try {
-    const parsed = JSON.parse(raw) as Project | LegacyProjectV2;
+    const parsed = JSON.parse(raw) as Project | LegacyProjectV2 | ProjectV3;
     if (!parsed || typeof parsed !== 'object') return null;
 
     if (parsed.version === LEGACY_PROJECT_VERSION) {
       const migrated = migrateLegacyV2(parsed as LegacyProjectV2);
+      syncIdCounterFromProject(migrated);
+      return migrated;
+    }
+
+    if (parsed.version === PROJECT_VERSION_V3) {
+      const migrated = migrateProjectV3(parsed as ProjectV3);
       syncIdCounterFromProject(migrated);
       return migrated;
     }
@@ -735,7 +957,7 @@ export function parseProject(raw: string): Project | null {
     }
     for (const scene of project.scenes) {
       if (!scene.timeline || !Array.isArray(scene.cameras)) return null;
-      normalizeScenePlanes(scene);
+      normalizeScenePaths(scene);
     }
     if (!project.master.clips.length) {
       const s = project.scenes[0];
@@ -749,6 +971,8 @@ export function parseProject(raw: string): Project | null {
     if (!project.scenes.some((s) => s.id === project.activeSceneId)) {
       project.activeSceneId = project.scenes[0].id;
     }
+    normalizeAllMasterClips(project);
+    pruneMasterTextsToDuration(project);
     syncIdCounterFromProject(project);
     return project;
   } catch {

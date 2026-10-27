@@ -1,12 +1,16 @@
 import type { Viewer } from '../../viewer/Viewer';
 import type { CamerasHandle } from '../cameras';
 import { ensureExtrudeDepth, type PlanesHandle } from '../planes';
+import type { PathsHandle } from '../paths';
 import {
+  AIRFLOW_ID,
   CAR_ID,
   CAR_LIGHTS_ID,
+  clampPathProgress,
   DOT_GRID_ID,
   FREE_CAMERA_ID,
   LIGHTING_ID,
+  MOTION_ID,
   ROOF_STROBE_ID,
   type Project,
   type Scene,
@@ -15,6 +19,7 @@ import {
 } from '../project';
 import { ENVIRONMENT_PRESETS } from '../../viewer/Viewer';
 import { DOT_GRID_EFFECT_MODES } from '../../viewer/dottedWrtScreen';
+import { poseFromCameraClip } from '../timeline';
 import { renderLookPanel } from './lookPanel';
 
 export type InspectorApi = {
@@ -24,6 +29,7 @@ export type InspectorApi = {
   getSelection: () => Selection;
   cameras: CamerasHandle;
   planes: PlanesHandle;
+  paths: PathsHandle;
   onChange: () => void;
   /** History-only (no panel rebuild) — used by look sliders. */
   onLookEdit: () => void;
@@ -143,10 +149,31 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
   selectionHost.append(title, body);
   host.append(selectionHost);
 
+  const syncCameraToPath = (cameraId: string) => {
+    const clip = api.cameras.get(cameraId);
+    if (!clip?.pathId) return;
+    const point = api.paths.getPointAt(
+      clip.pathId,
+      clampPathProgress(clip.pathProgress),
+    );
+    if (!point) {
+      clip.pathId = null;
+      return;
+    }
+    clip.position = { ...point };
+    api.cameras.refreshHelpers();
+    if (
+      api.cameras.playCameraId === clip.id ||
+      api.cameras.throughCameraId === clip.id
+    ) {
+      api.cameras.applyPose(poseFromCameraClip(clip));
+    }
+  };
+
   if (!sel.kind || !sel.id) {
     const p = document.createElement('p');
     p.style.cssText = 'color:var(--ed-muted);font-size:12px;padding:4px 0 12px';
-    p.textContent = 'Select a camera, light, or rectangle.';
+    p.textContent = 'Select a camera, light, path, or rectangle.';
     body.append(p);
   } else if (sel.kind === 'car' && sel.id === CAR_ID) {
     body.append(
@@ -183,6 +210,7 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
       const lookingThrough =
         api.cameras.viewMode === 'through' &&
         api.cameras.throughCameraId === clip.id;
+      const onPath = !!clip.pathId;
       body.append(
         field(
           'Name',
@@ -200,14 +228,64 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
             api.onChange();
           }),
         ),
-        field(
-          'Position',
-          vec3Inputs(clip.position, (v) => {
-            clip.position = v;
-            api.cameras.refreshHelpers();
-            if (lookingThrough) api.cameras.applyClip(clip.id);
-          }),
-        ),
+      );
+
+      const pathSelect = document.createElement('select');
+      pathSelect.className = 'ed-select';
+      const noneOpt = document.createElement('option');
+      noneOpt.value = '';
+      noneOpt.textContent = 'None';
+      pathSelect.append(noneOpt);
+      for (const path of api.paths.entries) {
+        const opt = document.createElement('option');
+        opt.value = path.id;
+        opt.textContent = path.params.name;
+        pathSelect.append(opt);
+      }
+      pathSelect.value = clip.pathId ?? '';
+      pathSelect.addEventListener('change', () => {
+        const nextId = pathSelect.value || null;
+        clip.pathId = nextId;
+        if (nextId) {
+          clip.pathProgress = clampPathProgress(clip.pathProgress);
+          syncCameraToPath(clip.id);
+          api.cameras.setGizmoTarget('aim');
+          api.setStatus(`Attached ${clip.name} to path`);
+        } else {
+          api.setStatus(`Detached ${clip.name} from path`);
+        }
+        api.cameras.refreshHelpers();
+        scene.cameras = api.cameras.clips.map((c) => structuredClone(c));
+        api.onChange();
+      });
+      body.append(field('Path', pathSelect));
+
+      if (onPath) {
+        body.append(
+          field(
+            'Path progress',
+            slider(clampPathProgress(clip.pathProgress), 0, 1, 0.001, (v) => {
+              clip.pathProgress = clampPathProgress(v);
+              syncCameraToPath(clip.id);
+              scene.cameras = api.cameras.clips.map((c) => structuredClone(c));
+              api.onLookEdit();
+            }),
+          ),
+        );
+      } else {
+        body.append(
+          field(
+            'Position',
+            vec3Inputs(clip.position, (v) => {
+              clip.position = v;
+              api.cameras.refreshHelpers();
+              if (lookingThrough) api.cameras.applyClip(clip.id);
+            }),
+          ),
+        );
+      }
+
+      body.append(
         field(
           'Target',
           vec3Inputs(clip.target, (v) => {
@@ -219,15 +297,19 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
       );
       const gizmoRow = document.createElement('div');
       gizmoRow.className = 'ed-row';
+      if (!onPath) {
+        gizmoRow.append(
+          btn('Move cam', () => {
+            api.cameras.setGizmoTarget('body');
+            api.cameras.setTransformMode('translate');
+          }),
+          btn('Rotate cam', () => {
+            api.cameras.setGizmoTarget('body');
+            api.cameras.setTransformMode('rotate');
+          }),
+        );
+      }
       gizmoRow.append(
-        btn('Move cam', () => {
-          api.cameras.setGizmoTarget('body');
-          api.cameras.setTransformMode('translate');
-        }),
-        btn('Rotate cam', () => {
-          api.cameras.setGizmoTarget('body');
-          api.cameras.setTransformMode('rotate');
-        }),
         btn('Move aim', () => {
           api.cameras.setGizmoTarget('aim');
         }),
@@ -274,7 +356,9 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
       tip.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
       tip.textContent = lookingThrough
         ? 'Looking through this shot. Use Back to free to edit the gizmo in free view.'
-        : 'Drag the transform gizmo to move/rotate. Use Move aim for the gold target. Look through to preview.';
+        : onPath
+          ? 'Camera rides the path. Drag Path progress or Move aim. Animate to keyframe progress + aim.'
+          : 'Drag the transform gizmo to move/rotate. Use Move aim for the gold target. Look through to preview.';
       body.append(tip);
     }
   } else if (sel.kind === 'carLights' && sel.id === CAR_LIGHTS_ID) {
@@ -529,6 +613,111 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
     hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
     hint.textContent =
       'Max Intensity is much hotter now. Flash duration (1–10s) drives Trigger strobe. For timeline: Animate Strobing on, then off when done — or keyframe Intensity.';
+    body.append(hint);
+  } else if (sel.kind === 'airflow' && sel.id === AIRFLOW_ID) {
+    const af = api.viewer.airflow.params;
+    const applyAf = () => {
+      api.viewer.airflow.applyParams();
+      api.onLookEdit();
+    };
+    body.append(
+      field(
+        'On',
+        check(af.enabled, (v) => {
+          af.enabled = v;
+          applyAf();
+        }),
+      ),
+      field(
+        'Speed',
+        slider(af.speed, 0, 3, 0.01, (v) => {
+          af.speed = v;
+          applyAf();
+        }),
+      ),
+      field(
+        'Brightness',
+        slider(af.brightness, 0, 8, 0.01, (v) => {
+          af.brightness = v;
+          applyAf();
+        }),
+      ),
+      field(
+        'Opacity',
+        slider(af.opacity, 0, 1, 0.01, (v) => {
+          af.opacity = v;
+          applyAf();
+        }),
+      ),
+      field(
+        'Width',
+        slider(af.width, 0.25, 4, 0.01, (v) => {
+          af.width = v;
+          applyAf();
+        }),
+      ),
+      field(
+        'Flow color',
+        colorInput(af.flowColor, (v) => {
+          af.flowColor = v;
+          applyAf();
+        }),
+      ),
+      field(
+        'Accent color',
+        colorInput(af.accentColor, (v) => {
+          af.accentColor = v;
+          applyAf();
+        }),
+      ),
+    );
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+    hint.textContent =
+      'Keyframe On off, then later On on — the lines grow from the nose across that span. On→Off fades out. Speed is streak travel once filled.';
+    body.append(hint);
+  } else if (sel.kind === 'motion' && sel.id === MOTION_ID) {
+    const mo = api.viewer.motion.params;
+    const applyMo = () => {
+      api.viewer.motion.applyParams();
+      api.onLookEdit();
+    };
+    body.append(
+      field(
+        'On',
+        check(mo.enabled, (v) => {
+          mo.enabled = v;
+          // First enable with zeroed sliders → seed visible defaults.
+          if (v && mo.wheelSpeed <= 0 && mo.shake <= 0) {
+            mo.wheelSpeed = 0.65;
+            mo.shake = 0.4;
+          }
+          applyMo();
+          api.onChange();
+        }),
+      ),
+      field(
+        'Wheel speed',
+        slider(mo.wheelSpeed, 0, 1, 0.01, (v) => {
+          mo.wheelSpeed = v;
+          applyMo();
+        }),
+      ),
+      field(
+        'Camera shake',
+        slider(mo.shake, 0, 1, 0.01, (v) => {
+          mo.shake = v;
+          applyMo();
+        }),
+      ),
+    );
+    const hubs = api.viewer.motion.hubCount();
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+    hint.textContent =
+      hubs > 0
+        ? `Wheels spin in the viewport (${hubs} hubs). Camera shake needs Look-through or Play so free framing stays clean.`
+        : 'Wheel hubs not bound on this model — reload the page. Shake still works through a shot / Play.';
     body.append(hint);
   } else if (sel.kind === 'dotGrid' && sel.id === DOT_GRID_ID) {
     const dg = api.viewer.dotGrid.params;
@@ -822,6 +1011,92 @@ export function renderInspector(host: HTMLElement, api: InspectorApi): void {
         ),
       );
       body.append(modes);
+    }
+  } else if (sel.kind === 'path') {
+    const entry = api.paths.entries.find((e) => e.id === sel.id);
+    if (entry) {
+      const p = entry.params;
+      body.append(
+        field(
+          'Name',
+          textInput(p.name, (v) => {
+            p.name = v;
+            api.onChange();
+          }),
+        ),
+      );
+
+      const pointLabel = document.createElement('div');
+      pointLabel.style.cssText =
+        'color:var(--ed-muted);font-size:11px;margin:4px 0 8px';
+      pointLabel.textContent = `${p.points.length} control points — drag the selected sphere in the viewport.`;
+      body.append(pointLabel);
+
+      const pointRow = document.createElement('div');
+      pointRow.className = 'ed-row';
+      for (let i = 0; i < p.points.length; i += 1) {
+        const idx = i;
+        pointRow.append(
+          btn(
+            String(i + 1),
+            () => {
+              api.paths.select(entry.id);
+              api.paths.selectPoint(idx);
+              api.onChange();
+            },
+            api.paths.selectedPointIndex === idx && api.paths.selectedId === entry.id
+              ? 'ed-btn primary'
+              : 'ed-btn',
+          ),
+        );
+      }
+      body.append(pointRow);
+
+      const editRow = document.createElement('div');
+      editRow.className = 'ed-row';
+      editRow.append(
+        btn('Add point', () => {
+          api.paths.select(entry.id);
+          api.paths.addPoint(entry.id);
+          scene.paths = api.paths.serialize();
+          // Keep attached cameras on the reshaped curve.
+          for (const cam of api.cameras.clips) {
+            if (cam.pathId === entry.id) syncCameraToPath(cam.id);
+          }
+          api.onChange();
+        }),
+        btn('Remove point', () => {
+          if (!api.paths.removePoint(entry.id)) {
+            api.setStatus('Paths need at least 2 points');
+            return;
+          }
+          scene.paths = api.paths.serialize();
+          for (const cam of api.cameras.clips) {
+            if (cam.pathId === entry.id) syncCameraToPath(cam.id);
+          }
+          api.onChange();
+        }),
+        btn(
+          'Delete path',
+          () => {
+            for (const cam of api.cameras.clips) {
+              if (cam.pathId === entry.id) cam.pathId = null;
+            }
+            api.paths.remove(entry.id);
+            scene.paths = api.paths.serialize();
+            scene.cameras = api.cameras.clips.map((c) => structuredClone(c));
+            api.onChange();
+          },
+          'ed-btn danger',
+        ),
+      );
+      body.append(editRow);
+
+      const tip = document.createElement('p');
+      tip.style.cssText = 'color:var(--ed-muted);font-size:11px;margin:8px 0 0';
+      tip.textContent =
+        'Attach a camera to this path in the camera inspector, then Animate Path Progress on the timeline.';
+      body.append(tip);
     }
   }
 
